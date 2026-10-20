@@ -1,0 +1,44 @@
+{
+  "crons": [
+    {
+      "path": "/api/health/drive",
+      "schedule": "40 6 * * *"
+    },
+    {
+      "path": "/api/meta/creatives",
+      "schedule": "50 6 * * *"
+    },
+    {
+      "path": "/api/meta/sync",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/google/sync",
+      "schedule": "15 7 * * *"
+    },
+    {
+      "path": "/api/pbi/elly-sync",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/google/crm-sync",
+      "schedule": "15 8 * * *"
+    },
+    {
+      "path": "/api/alerts/check",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/pack/auto-advance",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/tiktok/sync",
+      "schedule": "30 7 * * *"
+    },
+    {
+      "path": "/api/tiktok/crm-sync",
+      "schedule": "30 8 * * *"
+    }
+  ]
+}

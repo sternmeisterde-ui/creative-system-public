@@ -1,0 +1,439 @@
+export type Format = "ugc" | "static" | "animation" | "human" | "mixed";
+export type WinnerStatus = "winner" | "fake_winner" | "loser" | "unknown" | "testing";
+export type RiskSignal = "low_qual_cr" | "short_lifespan" | "low_roas_30d";
+export type Source = "internal" | "competitor";
+export type AdFlow = "com" | "gov";
+export type BriefStatus = "pending" | "approved" | "needs_revision";
+export type AlertType =
+  | "cpl_spike"
+  | "ctr_drop"
+  | "pack_dying"
+  | "winner_found"
+  | "loser_detected"
+  | "early_stop"
+  | "dead_zero_leads"
+  | "fake_winner_detected";
+export type ConceptStatus = "pending" | "approved" | "rejected";
+
+export interface Persona {
+  id: string;
+  code?: string;          // P1, P2, P3 ...
+  flow?: AdFlow;
+  name: string;
+  short: string;
+  description: string;
+  pointA: string;
+  pointB: string;
+  pains: string[];
+  triggers: string[];
+  age?: string;
+  gender?: string;
+  color: string;
+  createdAt: string;
+}
+
+export interface Hook {
+  id: string;
+  code?: string;          // H1, H2, H3 ...
+  flow?: AdFlow;
+  name: string;
+  template: string;
+  description: string;
+  examples: string[];
+  color: string;
+  createdAt: string;
+}
+
+export interface Body {
+  id: string;
+  code?: string;          // B1, B2, B3 ...
+  flow?: AdFlow;
+  name: string;
+  template: string;
+  description: string;
+  examples: string[];
+  color: string;
+  createdAt: string;
+}
+
+/** Концепция видео (type of video): мировая библиотека + флаг «наша». Код V{n}. */
+export interface Concept {
+  id: string;
+  code?: string;          // V1, V2 ...
+  name: string;
+  nameEn?: string | null;
+  category?: string | null;
+  description?: string | null;
+  whenWorks?: string | null;
+  example?: string | null;
+  isOurs: boolean;
+  oursNote?: string | null;
+  color?: string | null;
+  createdAt: string;
+}
+
+/** Актёр — конкретный человек в кадре: реальный (ANNA, PETER…) или ИИ-персонаж (WOM1987, MAN17645). */
+export interface Actor {
+  id: string;
+  code: string;
+  name: string;
+  kind: "real" | "ai";
+  gender?: "f" | "m" | null;
+  description?: string | null;
+  referenceUrl?: string | null;
+  notes?: string | null;
+  createdAt: string;
+}
+
+export interface Angle {
+  id: string;
+  code?: string;          // A1, A2, A3 ...
+  flow?: AdFlow;
+  name: string;
+  template: string;
+  description: string;
+  examples: string[];
+  color: string;
+  createdAt: string;
+}
+
+export interface Creative {
+  id: string;
+  source: Source;
+  flow?: AdFlow;
+  personaId: string;
+  hookId: string;
+  bodyId: string;
+  angleId: string;
+  format: Format;
+  status: WinnerStatus;
+  metaAdId?: string;
+  metaAdName?: string;
+  description?: string;
+  notes?: string;
+  competitorName?: string;
+  rawText?: string;
+  createdAt: string;
+}
+
+export interface Scenario {
+  id: string;
+  paramType: "persona" | "hook" | "body" | "angle" | "concept" | "actor";
+  paramId: string;
+  content: string;
+  tz: string;
+  createdAt: string;
+}
+
+export interface Brief {
+  id: string;
+  sessionId: string;
+  personaId: string | null;   // formulations.id; null = без прямого обращения к аудитории
+  hookId: string;
+  bodyId: string;
+  angleId: string;
+  format: Format;
+  adaptedHook: string;
+  adaptedBody: string;
+  adaptedAngle: string;
+  fullBrief: string;
+  status: BriefStatus;
+  revisionNote?: string;
+  batchIndex?: number;
+  createdAt: string;
+}
+
+export interface ConstructorSession {
+  id: string;
+  name: string;
+  flow?: AdFlow;
+  selectedPersonas: string[];
+  selectedHooks: string[];
+  selectedBodies: string[];
+  selectedAngles: string[];
+  format: Format;
+  totalCombinations: number;
+  status: "draft" | "scenarios" | "generating" | "done";
+  createdAt: string;
+  packMetadata?: PackMetadata;
+  packSize?: number;
+  generatedAt?: string;
+}
+
+// ── Pack Generator (auto-builder) ────────────────────────────────────────────
+
+export type PackSlotCategory = "winner_family" | "winner_mix" | "discovery" | "competitor" | "transfer";
+
+export interface PackSlot {
+  slotId: number;
+  category: PackSlotCategory;
+  codes: {
+    persona: string | null;  // P-code
+    hook:    string | null;  // H-code
+    body:    string | null;  // B-code
+    angle:   string | null;  // A-code
+    concept?: string | null; // V-code — концепция видео (type of video), если пак строится под неё
+    actor?: string | null;   // код актёра (ANNA / RW5 / WOM1950) — кто в кадре; обязателен для видео
+  };
+  rationale: string;             // короткое объяснение «почему эта комбинация»
+  change?: { axis: "persona" | "hook" | "body" | "angle" | "concept"; fromCode: string | null; toCode: string; kind?: "helps" | "helps-concept" | "cross" | "explore" | "ours" | "transfer"; tier?: "A" | "B" | "C" } | null; // было → стало; kind — откуда «стало», tier — уровень доказательности
+  // category-specific поля:
+  basedOnAd?: string;            // winner_family: имя оригинального винера
+  variedParam?: "persona" | "hook" | "body" | "angle";  // winner_family
+  fromWinners?: string[];        // winner_mix: список ad_name винеров-доноров
+  helpsCodes?: string[];         // discovery: HELPS-коды по бивариату
+  sourceConceptId?: string;      // competitor: uuid из competitor_concepts
+  newCodesCreated?: string[];    // competitor: какие коды AI создал в /library
+}
+
+export interface PackMetadata {
+  slots: PackSlot[];
+  distribution: Record<PackSlotCategory, number>;
+  cold_start: boolean;
+  format: Format;
+  /** Продукт пака: buchhalter | medadmin | all (lib/product.ts) */
+  product?: "all" | "buchhalter" | "medadmin";
+  /** Отчёт, на котором построен пак (основа флоу конструктор → сценарии → брифы) */
+  report?: { id: string; createdAt: string; platform: string; product: string; dateFrom: string | null; dateTo: string | null; overall: string | null } | null;
+  /** Концепция видео (V-код из библиотеки concepts), под которую собран пак; null = без концепции */
+  concept?: { code: string; name: string } | null;
+  /** Дизайн эксперимента (движок lib/pack-engine.ts): матрица код → слоты и заметки об измеримости */
+  experiment?: { matrix: Array<{ axis: string; code: string; label: string; slots: number[]; isNew: boolean }>; notes: string[]; mode: "engine" | "claude" } | null;
+  /** Ограничения, с которыми собран пак */
+  constraints?: { exploreConcepts: string[]; blockedConcepts: string[]; actorPool: string[] | null; autoExplore: number } | null;
+  flow: AdFlow;
+  data_snapshot: {
+    winners: number;
+    fake_winners: number;
+    losers: number;
+    approved_competitors: number;
+  };
+}
+
+export interface Rule {
+  id: string;
+  title: string;
+  content: string;
+  category: "adaptation" | "hook" | "body" | "angle" | "persona" | "general";
+  active: boolean;
+  createdAt: string;
+}
+
+// ── Meta API ──────────────────────────────────────────────────────────────────
+
+export interface MetaAd {
+  id: string;
+  adId: string;
+  adName: string;
+  adsetId?: string;
+  adsetName?: string;
+  campaignId?: string;
+  campaignName?: string;
+  flow?: AdFlow;
+  accountId?: string;
+  date: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  reach: number;
+  frequency: number;
+  cpm: number;
+  ctr: number;
+  cpc: number;
+  createdAt: string;
+}
+
+// ── PBI ───────────────────────────────────────────────────────────────────────
+
+export interface PbiMetric {
+  id: string;
+  adId: string;
+  adName?: string;
+  date: string;
+  leads: number;
+  qualLeads: number;
+  revenue: number;
+  transactions: number;
+  createdAt: string;
+}
+
+// ── Creative Performance (view) ───────────────────────────────────────────────
+
+export interface CreativePerformance {
+  adId: string;
+  adName: string;
+  flow?: AdFlow;
+  platform?: "meta" | "google" | "tiktok" | null; // канал (view creative_performance, миграция 024)
+  campaignId?: string;
+  campaignName?: string;
+  adsetId?: string;
+  adsetName?: string;
+  // Meta метрики
+  spend: number;
+  impressions: number;
+  clicks: number;
+  frequency: number;
+  cpm: number;
+  ctr: number;
+  cpc: number;
+  // Видео-метрики (Meta): hook rate = 3s/показы, hold rate = thruplay/3s. У статики null.
+  hookRate?: number | null;
+  holdRate?: number | null;
+  // PBI метрики
+  leads: number;
+  qualLeads: number;
+  revenue: number;
+  transactions: number;
+  // Расчётные
+  cpl: number | null;
+  cpql: number | null;
+  crLeadToQual: number | null;
+  crQualToTxn: number | null;
+  crClickToLead: number | null;
+  roas: number | null;
+  // Авто-статус
+  autoStatus: WinnerStatus;
+  riskSignals: RiskSignal[];
+  // Плановые
+  targetCpl: number;
+  targetCpql: number;
+  // Даты и жизненный цикл
+  firstSeen: string;
+  lastSeen: string;
+  lifespanDays: number;
+  ageDays: number;
+  isActive: boolean;
+}
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+
+export interface CreativeAlert {
+  id: string;
+  adId?: string;
+  adName?: string;
+  flow?: AdFlow;
+  alertType: AlertType;
+  message: string;
+  value?: number;
+  threshold?: number;
+  dismissed: boolean;
+  createdAt: string;
+}
+
+// ── Competitor Concepts ───────────────────────────────────────────────────────
+
+export interface CompetitorConcept {
+  id: string;
+  source: string;
+  conceptType?: string;
+  title: string;
+  description?: string;
+  rawData?: Record<string, unknown>;
+  status: ConceptStatus;
+  approvedBy?: string;
+  approvedAt?: string;
+  createdParamId?: string;
+  createdParamType?: string;
+  createdAt: string;
+}
+
+// ── Analysis Report (единый отчёт по массиву, /report) ─────────────────────────
+
+export interface ReportKpi {
+  packHealth: "healthy" | "warning" | "dying" | "unknown";
+  winners: number;
+  fakeWinners: number;
+  losers: number;
+  testing: number;
+  blendedCpl: number | null;
+  blendedCpql: number | null;
+  totalSpend: number;
+  activeAds: number;
+}
+
+export interface ReportSignal {        // HELPS / HURTS — конкретная формулировка (код = один дословный текст)
+  code: string;
+  paramType: string;
+  label: string;                       // дословный текст формулировки
+  ratio: number | null;
+  adCount?: number;                    // в скольких крео встречается
+  ads?: string[];                      // имена этих крео (до 8)
+  withCpl?: number | null;             // CPL крео с этой формулировкой
+  withoutCpl?: number | null;          // CPL остальных
+}
+
+export interface ReportFamily {        // семья: 3 кода фикс, 1 варьируется
+  varyingParam: string;
+  shared: string;                      // напр. "P1 H2 B3"
+  bestCpl: number | null;
+  worstCpl: number | null;
+  spread: number | null;
+}
+
+export interface ReportCombo {
+  codes: string;                       // напр. "P1 + H2"
+  winners: number;
+  cpl: number | null;
+  spend: number;
+}
+
+export interface ReportCompetitor {
+  title: string;
+  type?: string;
+  hook?: string;
+}
+
+export interface ReportHookSignal {    // hook rate по коду (плеи/показы)
+  code: string;
+  paramType: string;
+  label: string;
+  hookRate: number | null;
+  holdRate: number | null;
+  ratio: number | null;
+  verdict: string;
+}
+export interface ReportVisual {
+  helps: ReportSignal[];
+  hurts: ReportSignal[];
+  families: ReportFamily[];
+  combos: ReportCombo[];
+  competitors: ReportCompetitor[];
+  hookHelps?: ReportHookSignal[];
+  hookHurts?: ReportHookSignal[];
+}
+
+// ── Проверка отчёта независимыми моделями (Gemini + Codex/OpenAI) ───────────────
+
+export interface ReportVerificationIssue {
+  severity: "high" | "medium" | "low";
+  area: string;                        // напр. "metrics", "winners", "recommendations"
+  detail: string;                      // что не так
+}
+
+export interface ReportVerification {
+  model: string;                       // "gemini" | "codex"
+  status: "ok" | "warning" | "fail" | "skipped" | "error";
+  confidence: number;                  // 0..1
+  issues: ReportVerificationIssue[];
+  summary: string;                     // короткий вывод
+}
+
+export interface ReportVerifications {
+  overall: "ok" | "warning" | "fail";  // консенсус: fail если хоть один fail
+  checks: ReportVerification[];
+}
+
+export interface AnalysisReport {
+  id: string;
+  createdAt: string;
+  created_at?: string;                 // как приходит из API (snake)
+  platform?: string;                   // meta | google | tiktok | all
+  date_from?: string | null;           // окно отчёта; null = lifetime
+  date_to?: string | null;
+  product?: string;                    // all | buchhalter | medadmin
+  flow: string;                        // com | gov | all
+  kpi: ReportKpi;
+  visual: ReportVisual;
+  narrative: string;
+  verifications?: ReportVerifications | null;
+}
