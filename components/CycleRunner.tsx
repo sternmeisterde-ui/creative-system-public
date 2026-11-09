@@ -11,7 +11,7 @@ type Status = "idle" | "run" | "done" | "error";
 interface Stage { key: string; label: string; status: Status; detail?: string }
 
 // Шаги цикла — свои у каждого канала. Meta: синк Meta + Elly → маппинг → ассеты → Gemini → отчёт.
-// Google: синк крео + CRM (Elly) → Gemini → отчёт (маппинг кодов — на /mapping/google).
+// Google: синк крео + CRM (Elly) → маппинг кодов (прокладка /api/google/automap) → Gemini → отчёт.
 const STAGES_BY_CHANNEL: Record<string, Stage[]> = {
   meta: [
     { key: "sync",   label: "1. Синхронизация Meta + Elly", status: "idle" },
@@ -23,8 +23,9 @@ const STAGES_BY_CHANNEL: Record<string, Stage[]> = {
   google: [
     { key: "sync",   label: "1. Синхронизация Google Ads (крео + превью)", status: "idle" },
     { key: "crm",    label: "2. Лиды из CRM (Elly) по крео",               status: "idle" },
-    { key: "gemini", label: "3. Gemini-разбор крео",                        status: "idle" },
-    { key: "report", label: "4. Отчёт + проверка",                          status: "idle" },
+    { key: "map",    label: "3. Маппинг кодов (визуал Meta → тексты)",     status: "idle" },
+    { key: "gemini", label: "4. Gemini-разбор крео",                        status: "idle" },
+    { key: "report", label: "5. Отчёт + проверка",                          status: "idle" },
   ],
   tiktok: [
     { key: "sync",   label: "1. Синхронизация TikTok Ads (объявления + медиа)", status: "idle" },
@@ -66,6 +67,18 @@ export default function CycleRunner({ channel = "meta" }: { channel?: string }) 
         set("crm", "run");
         const c = await post(`/api/${channel}/crm-sync`);
         set("crm", "done", c.aborted ? "частичный ответ Plurio — повтори" : `${c.synced ?? "?"} строк`);
+        if (channel === "google") {
+          // прокладка: Google-крео получают коды формулировок до отчёта (06.11.2026)
+          set("map", "run", "сопоставляю с Meta…");
+          const t = { hash: 0, text: 0, vis: 0, newShoot: 0, needVideo: 0 }; let rem = 0; let errs: string[] = [];
+          for (let i = 0; i < 40; i++) {
+            const m = await post("/api/google/automap");
+            t.hash += m.byHash ?? 0; t.text += m.byText ?? 0; t.vis += m.visualMatched ?? 0; t.newShoot += m.newShoot ?? 0; t.needVideo = m.needVideoDownload ?? t.needVideo; rem = m.remaining ?? 0; errs = m.errors ?? [];
+            set("map", "run", `копий по визуалу ${t.hash}, по тексту ${t.text}, видео тот же ролик ${t.vis}; осталось ${rem}`);
+            if (!rem || !(m.processed ?? 0)) break;
+          }
+          set("map", errs.length && !t.hash && !t.text ? "error" : "done", `копий по визуалу ${t.hash} · по тексту ${t.text} · видео: тот же ролик ${t.vis}, новая съёмка ${t.newShoot}${t.needVideo ? ` · ${t.needVideo} роликов YouTube не скачаны` : ""}${errs.length ? ` · ошибок ${errs.length}: ${errs[0]}` : ""}`);
+        }
       } else {
         // 1. Данные
         set("sync", "run", "Meta…");
@@ -129,7 +142,7 @@ export default function CycleRunner({ channel = "meta" }: { channel?: string }) 
         </Button>
       </div>
       <p style={{ fontSize: 12, color: "#666", marginTop: -4, marginBottom: 12 }}>
-        {channel === "google" ? "Крео и превью из Google Ads → лиды из CRM → Gemini-разбор → отчёт по каналу." : channel === "tiktok" ? "Объявления и медиа из TikTok Ads → лиды из CRM (источник TikTok) → Gemini-разбор → отчёт по каналу." : "Данные → маппинг → ассеты → Gemini-разбор → отчёт по каналу."} Останавливается перед генерацией пака — отчёт нужно принять глазами.
+        {channel === "google" ? "Крео и превью из Google Ads → лиды из CRM → коды формулировок (копии Meta по визуалу, иначе тексты) → Gemini-разбор → отчёт по каналу." : channel === "tiktok" ? "Объявления и медиа из TikTok Ads → лиды из CRM (источник TikTok) → Gemini-разбор → отчёт по каналу." : "Данные → маппинг → ассеты → Gemini-разбор → отчёт по каналу."} Останавливается перед генерацией пака — отчёт нужно принять глазами.
       </p>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {stages.map(s => (

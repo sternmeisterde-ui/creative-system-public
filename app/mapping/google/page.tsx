@@ -19,6 +19,10 @@ interface Mapping {
   bodyCode: string | null;
   angleCode: string | null;
   flow: string | null;
+  mappedBy?: string | null;   // google-hash | google-visual | google-text — прокладка Google → коды
+  note?: string | null;
+  actorCode?: string | null;
+  conceptCode?: string | null;
 }
 interface ParamOption { code: string | null; name: string }
 
@@ -188,6 +192,10 @@ export default function GoogleMappingPage() {
                 </span>
               </a>
               <div title={a.adName} style={{ fontSize: 10, color: "#888", margin: "7px 0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.adName}</div>
+              {(() => { const m = mapByName[a.adName.trim().toLowerCase()]; const by = m?.mappedBy; if (!by?.startsWith("google-")) return null;
+                const lbl = by === "google-hash" ? "копия Meta по визуалу" : by === "google-visual" ? `тот же ролик · ${m?.actorCode ?? "—"} · ${m?.conceptCode ?? "—"}` : "коды по тексту, визуал свой";
+                const col = by === "google-text" ? "#E8AA42" : "#6EC8A0";
+                return <div title={m?.note ?? ""} style={{ fontSize: 10, color: col, marginBottom: 6 }}>⚙ {lbl}</div>; })()}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
                 <Sel asset={a} field="personaCode" opts={personas} />
                 <Sel asset={a} field="hookCode" opts={hooks} />

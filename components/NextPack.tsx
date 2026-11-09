@@ -19,6 +19,7 @@ interface Proposal {
   winners: Array<{ adName: string; cpl: number | null; leads: number; spend: number; medium?: "video" | "static" }>; transferDonors: Array<{ adName: string; cpl: number | null; medium: "video" | "static" }>; tiers: Record<string, "A" | "B" | "C">; medium: "video" | "static"; exploreList: string[]; concepts: { untested: ConceptOpt[]; tested: ConceptOpt[] }; actors: { code: string; name: string; kind: string }[];
   signals: { helps: { code: string; paramType: string; ratio: number | null; withCount: number }[]; helpsConcepts: { code: string; ratio: number | null; withCount: number }[] };
   report: { id: string; createdAt: string; dateFrom: string | null; dateTo: string | null; overall: string | null };
+  successors?: Record<string, string>; // устаревший код → преемник (норма фактов продукта) — для проверки пака
 }
 
 const CAT: Record<PackSlotCategory, { label: string; color: string; desc: string }> = {
@@ -60,7 +61,7 @@ export default function NextPack({ product, reportId, compact }: { product: "buc
   const verify = useCallback(async (p: Proposal, keptSlots: PackSlot[]) => {
     setVerifying(true); setVerif(null); setOverrideGate(false);
     try {
-      const r = await fetch("/api/pack/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product, format, slots: keptSlots, labels: p.labels, signals: p.signals, winners: p.winners, transferDonors: p.transferDonors, medium: p.medium, exploreList: p.exploreList, notes: p.notes, report: p.report }) });
+      const r = await fetch("/api/pack/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product, format, slots: keptSlots, labels: p.labels, signals: p.signals, winners: p.winners, transferDonors: p.transferDonors, medium: p.medium, exploreList: p.exploreList, successors: p.successors, notes: p.notes, report: p.report }) });
       const j = await r.json();
       if (r.ok && j.verifications) setVerif(j.verifications as Verification);
       else setVerif({ overall: "warning", checks: [{ model: "system", status: "error", confidence: 0, issues: [], summary: j.error ?? `HTTP ${r.status}` }] });

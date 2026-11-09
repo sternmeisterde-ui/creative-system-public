@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
   const sb = createServiceClient();
   const report = body.reportId ? await loadReportById(sb, body.reportId) : await loadLatestReport(sb, product);
   if (!report) return NextResponse.json({ error: `Нет отчёта по продукту «${productMeta(product).label}» — сначала собери отчёт.`, gate: "no_report" }, { status: 409 });
+  const nonMeta = !!report.platform && report.platform !== "meta" && report.platform !== "all";
   const rows = (report.snapshot?.rows ?? []).map(r => ({ ad_name: r.ad_name, auto_status: r.auto_status, spend: Number(r.spend ?? 0), cpl: r.cpl, cpql: r.cpql, leads: Number(r.leads ?? 0) }));
   if (!rows.length) return NextResponse.json({ error: "У отчёта нет снапшота строк — перегенерируй отчёт." }, { status: 409 });
 
@@ -32,10 +33,19 @@ export async function POST(req: NextRequest) {
   const format: Format = body.format ?? "ugc";
   const result = designPack({
     format, packSize: Math.max(3, Math.min(40, Number(body.packSize) || 20)),
-    rows, lifetimeRows: data.lifetimeRows, medium: data.medium, mapping: data.mapping, formulations: data.formulations, concepts: data.concepts, actors: data.actors, usage: data.usage,
+    rows, lifetimeRows: data.lifetimeRows, medium: data.medium, mapping: data.mapping, formulations: data.formulations, concepts: data.concepts, actors: data.actors, usage: data.usage, successors: data.successors,
     exploreConcepts: body.exploreConcepts ?? [], autoExplore: body.autoExplore ?? 2, blockedConcepts: body.blockedConcepts ?? DEFAULT_BLOCKED_CONCEPTS,
     actorPool: body.actorPool ?? null, actorKind: body.actorKind ?? null, transfer: body.transfer ?? true, shares: body.shares,
   });
+  // Google/TikTok-отчёт (05.11.2026): коды у таких креативов появляются только через /mapping/google. Если ни один виннер отчёта
+  // не размечен, движку не на чем строить — говорим это числами, а не «0 виннеров» в заметках.
+  if (nonMeta && !result.winners.length && !result.transferDonors.length) {
+    const winnerNames = rows.filter(r => r.auto_status === "winner").map(r => r.ad_name.trim().toLowerCase());
+    const mappedSet = new Set(data.mapping.filter(m => m.hookCode && m.bodyCode && m.angleCode).map(m => m.adName.trim().toLowerCase()));
+    const mapped = winnerNames.filter(n => mappedSet.has(n)).length;
+    const label = report.platform === "google" ? "Google Ads" : report.platform === "tiktok" ? "TikTok Ads" : report.platform;
+    return NextResponse.json({ error: `В отчёте ${label} ${winnerNames.length} виннеров, с формулировками (хук + боди + энгл) — ${mapped}. Пак строится на кодах: разметь виннеров на «Маппинг Google» (Gemini выпишет тексты по файлу) и пересобери, либо собери пак на отчёте Meta.`, gate: "unmapped_winners", winners: winnerNames.length, mapped }, { status: 409 });
+  }
   // Подписи только для кодов, которые встречаются в результате
   const used = new Set<string>();
   for (const s of result.slots) for (const c of Object.values(s.codes)) if (c) used.add(c);
@@ -61,6 +71,6 @@ export async function POST(req: NextRequest) {
       lifetimeHelps: result.signals.lifetimeHelps.slice(0, 30).map(r => ({ code: r.code, paramType: r.paramType, ratio: r.ratio, withCount: r.withCount, withCpl: r.withCpl })),
     },
     tiers: result.tiers, medium: result.medium, transferDonors: result.transferDonors,
-    labels, refs, winners: result.winners, exploreList: result.exploreList, concepts: { untested: untestedConcepts, tested: testedConcepts }, actors: data.actors,
+    labels, refs, winners: result.winners, exploreList: result.exploreList, successors: data.successors, concepts: { untested: untestedConcepts, tested: testedConcepts }, actors: data.actors,
   });
 }

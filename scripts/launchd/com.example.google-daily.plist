@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ежедневная докачка скрытых роликов YouTube из Google Ads + прокладка Google → коды (scripts/google-daily.sh).
+     Установка: cp в ~/Library/LaunchAgents/ и launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.google-daily.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.google-daily</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>scripts/google-daily.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/PATH/TO/creative-system</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <!-- каждый день в 09:15; если Mac спал, launchd запустит при пробуждении -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>15</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/PATH/TO/Library/Logs/google-daily.log</string>
+    <key>StandardErrorPath</key>
+    <string>/PATH/TO/Library/Logs/google-daily.log</string>
+</dict>
+</plist>

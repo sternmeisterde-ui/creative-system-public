@@ -5,6 +5,9 @@ import { createServiceClient } from "@/lib/supabase";
 import { getAiContext, getBusiness, getProductFacts } from "@/lib/brief";
 import { ruVideoBriefSystem } from "@/lib/ru-video-brief";
 import { overlapNotes } from "@/lib/param-overlap";
+import { formulationsGender, detectSpeechGender, genderLabel } from "@/lib/text-gender";
+import { outdatedIn } from "@/lib/norms";
+import { slotCoherenceIssue, personaRole, deixisRef } from "@/lib/topic-fit";
 import { FORMULATION_COLUMNS, rowToFormulation, ensureFormulation, loadFormulations, productOfCode, AXIS_LABEL, type Formulation, type FormulationRow, type Axis, type FormulationProduct } from "@/lib/formulations";
 import { resolveParamRefs, type ParamRef } from "@/lib/param-lookup";
 import { extractSpeech, lintSpeech, lintScenes, formatLintBlock } from "@/lib/speech-lint";
@@ -74,7 +77,7 @@ export async function POST(req: NextRequest) {
 
   type Combo = {
     personaId: string | null; hookId: string; bodyId: string; angleId: string; actorCode?: string | null;
-    category?: string; basedOnAd?: string; variedParam?: string; fromWinners?: string[];
+    category?: string; basedOnAd?: string; variedParam?: string; fromWinners?: string[]; slotId?: number | null; conceptCode?: string | null;
   };
   const combinations: Combo[] = [];
   let skippedIncomplete = 0;
@@ -154,11 +157,16 @@ ${libBlock}
       const { data } = await supabase.from("formulations").select(FORMULATION_COLUMNS).in("code", codes.slice(i, i + 200));
       for (const r of (data ?? []) as FormulationRow[]) { const f = rowToFormulation(r); byCode.set(f.code, f); refById[f.id] = { id: f.id, code: f.code, text: f.text, legacy: false }; if (f.note) noteById[f.id] = f.note; }
     }
-    // уже готовые брифы сессии (по id формулировок) — чтобы догенерировать только недостающие
+    // уже готовые брифы сессии — чтобы догенерировать только недостающие. Ключ — слот пака (slot_id);
+    // старые брифы без slot_id — по id формулировок (21.10.2026: слоты 4/9/10 с одними кодами и разной концепцией схлопывались)
     const existing = new Set<string>();
+    const existingSlots = new Set<number>();
     if (skipExisting) {
-      const { data: ex } = await supabase.from("briefs").select("persona_id, hook_id, body_id, angle_id").eq("session_id", session.id);
-      for (const b of ex ?? []) existing.add([b.persona_id, b.hook_id, b.body_id, b.angle_id].map(x => x ?? "").join("|"));
+      const { data: ex } = await supabase.from("briefs").select("persona_id, hook_id, body_id, angle_id, slot_id").eq("session_id", session.id);
+      for (const b of ex ?? []) {
+        if (typeof b.slot_id === "number") existingSlots.add(b.slot_id);
+        else existing.add([b.persona_id, b.hook_id, b.body_id, b.angle_id].map(x => x ?? "").join("|"));
+      }
     }
     for (const slot of packMeta.slots) {
       if (onlySlots && !onlySlots.has((slot as { slotId?: number }).slotId ?? -1)) continue;
@@ -168,9 +176,10 @@ ${libBlock}
       const angleId   = slot.codes.angle   ? byCode.get(slot.codes.angle)?.id   : undefined;
       // Хук, боди, энгл обязательны (сюда доходят только слоты, которые не удалось дозаполнить); персона может быть null
       if (!hookId || !bodyId || !angleId) { skippedIncomplete++; continue; }
-      if (skipExisting && existing.has([personaId, hookId, bodyId, angleId].join("|"))) continue;
+      const slotId = (slot as { slotId?: number }).slotId ?? null;
+      if (skipExisting && (slotId != null ? existingSlots.has(slotId) : existing.has([personaId, hookId, bodyId, angleId].join("|")))) continue;
       combinations.push({
-        personaId, hookId, bodyId, angleId, actorCode: slot.codes.actor ?? null,
+        personaId, hookId, bodyId, angleId, actorCode: slot.codes.actor ?? null, slotId, conceptCode: (slot.codes as { concept?: string | null }).concept ?? null,
         category: slot.category, basedOnAd: slot.basedOnAd, variedParam: slot.variedParam, fromWinners: slot.fromWinners,
       });
     }
@@ -243,7 +252,9 @@ ${libBlock}
 1. Параметры креатива — дословные формулировки с кодами (персона, хук, боди, энгл). Они измеряются в аналитике по точному тексту: звучат или показываются на экране ДОСЛОВНО, без перефраза, сокращений и «улучшений». Шаг 3 скилла «3 варианта хука» = 3 варианта ПОДАЧИ первого кадра при одних и тех же словах хука.
 2. Призыв для рекламы Meta Ads = действие + место: «Пройдите тест под видео, займёт две минуты». Комментарий — только вторым, необязательным. Правило скилла «не ссылка» здесь не действует: тест под видео и есть цель ролика.
 3. Формат выдачи — шаблон из задания (расширяет templates/brief.md разделами ПАРАМЕТРЫ В РОЛИКЕ, ТЗ НА МОНТАЖ, ПРОМПТ ДЛЯ HIGGSFIELD). Раздел «Варианты для теста» не нужен: пак уже дизайн эксперимента. Шаг 7 (check_brief.py) выполнит система линтером после ответа — блок «Проверка речи» не писать.
-4. Один ролик = одна мысль по шагам. Каждый параметр звучит один раз; что дублирует уже сказанное — только плашка на экране. Смена кадра каждые 5–7 с. Бюджет ≤ 2,2 слова в секунду, при нехватке поднимать хронометраж, а не резать формулировки.
+4. Связность: каждое «эта/она/он/там/тогда» в речи имеет видимого или названного референта в предыдущей сцене — иначе сцена перестраивается. Один ролик = одна тема; персона, хук, боди и энгл раскрывают её по шагам. Если персона — история от первого лица, а концепция — интервью, её говорит собеседник, не ведущий; швы вроде «это про язык, а теперь про деньги» запрещены — если осям нечем связаться, бриф не пишется (это проверяет код до генерации).
+5. Пол актёра и род речи совпадают. Формулировки от первого лица задают род («посчитала» — женщина говорит о себе); актёр того же пола (проверено кодом до генерации), связки и подача — в том же роде. Пересказ чужой истории от лица другого пола («мне написала женщина: …») запрещён: зритель видит человека в кадре и слышит его историю.
+6. Один ролик = одна мысль по шагам. Каждый параметр звучит один раз; что дублирует уже сказанное — только плашка на экране. Смена кадра каждые 5–7 с. Бюджет ≤ 2,2 слова в секунду, при нехватке поднимать хронометраж, а не резать формулировки.
 
 ${getProductFacts()}
 
@@ -255,10 +266,37 @@ ${EDITOR_RULES}`;
     batches.push(combinations.slice(i, i + BATCH_SIZE));
   }
 
+  const packProductForNorms: FormulationProduct = (() => { const pm = (session as { packMetadata?: { product?: string } }).packMetadata?.product; if (pm === "buchhalter" || pm === "medadmin") return pm; const any = Object.values(refById).map(r => r.code).find(c => !!productOfCode(c)); return (any && productOfCode(any)) || "buchhalter"; })();
+  // Категории концепций — для роли персоны (история от первого лица в интервью = реплика собеседника)
+  const conceptCodesAll = Array.from(new Set(combinations.map(c => c.conceptCode).filter((x): x is string => !!x)));
+  const { data: conceptRows } = conceptCodesAll.length ? await supabase.from("concepts").select("code, category").in("code", conceptCodesAll) : { data: [] as Array<{ code: string; category: string | null }> };
+  const conceptCategory = new Map(((conceptRows ?? []) as Array<{ code: string; category: string | null }>).map(c => [c.code.toUpperCase(), c.category]));
+  const roleOf = (c: Combo): "host" | "interviewee" | null => personaRole(c.personaId ? refById[c.personaId]?.text : null, c.conceptCode ? conceptCategory.get(c.conceptCode.toUpperCase()) ?? null : null);
+  // Предохранитель: род формулировок ↔ пол актёра (движок пака это уже сверяет; ручной конструктор и старые паки — нет)
+  const genderWarnings: string[] = [];
+  if (session.format !== "static") {
+    for (let i = combinations.length - 1; i >= 0; i--) {
+      const c = combinations[i];
+      const texts = [c.personaId ? refById[c.personaId]?.text : null, refById[c.hookId]?.text, refById[c.bodyId]?.text, refById[c.angleId]?.text];
+      const coherence = slotCoherenceIssue({ persona: texts[0], hook: texts[1] ?? "", body: texts[2] ?? "", angle: texts[3] ?? "", conceptCategory: c.conceptCode ? conceptCategory.get(c.conceptCode.toUpperCase()) ?? null : null, changedAxis: c.variedParam ?? null });
+      if (coherence) { genderWarnings.push(`${c.slotId != null ? `слот ${c.slotId}` : refById[c.hookId]?.code}: ${coherence} — бриф не сгенерирован, пересобери слот`); combinations.splice(i, 1); continue; }
+      const { gender, conflict } = formulationsGender(texts);
+      const actor = c.actorCode ? actorByCode.get(c.actorCode.toUpperCase()) : undefined;
+      const ag = actor?.gender === "f" || actor?.gender === "m" ? actor.gender : null;
+      if (conflict) { genderWarnings.push(`${refById[c.hookId]?.code ?? "?"} + ${refById[c.bodyId]?.code ?? "?"}: формулировки разного рода — бриф не сгенерирован`); combinations.splice(i, 1); continue; }
+      const outdated = (["persona","hook","body","angle"] as const).map(ax => { const id = ax === "persona" ? c.personaId : c[`${ax}Id`]; const t = id ? refById[id]?.text : null; const cl = t ? outdatedIn(t, packProductForNorms) : null; return cl ? `${refById[id as string]?.code}: ${cl.note}` : null; }).filter((x): x is string => !!x);
+      if (outdated.length) { genderWarnings.push(`устаревший факт в формулировке — ${outdated.join("; ")}: бриф не сгенерирован, пересобери пак (движок подставит преемника)`); combinations.splice(i, 1); continue; }
+      if (gender && ag && gender !== ag) { genderWarnings.push(`${refById[c.bodyId]?.code ?? "?"} от ${genderLabel(gender)} лица, актёр ${c.actorCode} — ${genderLabel(ag)} пол: смени актёра в паке, бриф не сгенерирован`); combinations.splice(i, 1); }
+    }
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
+      const heartbeat = setInterval(() => { try { controller.enqueue(encoder.encode(JSON.stringify({ __heartbeat: Date.now() }) + "\n")); } catch { /* поток закрыт */ } }, 25_000);
       try {
         let done = 0;
+        controller.enqueue(encoder.encode(JSON.stringify({ __started: combinations.length }) + "\n"));
+        for (const w of genderWarnings) controller.enqueue(encoder.encode(JSON.stringify({ __warning: w }) + "\n"));
         // Запускаем все батчи параллельно
         const buildBatchPrompt = (batch: typeof combinations) => {
           const isVideo = session.format !== "static";
@@ -297,10 +335,10 @@ ${batch.map((combo, idx) => {
   const actor = combo.actorCode ? actorByCode.get(combo.actorCode.toUpperCase()) : undefined;
   const ov = isVideo && hook && body && angle ? overlapNotes({ persona: persona?.text ?? null, hook: hook.text, body: body.text, angle: angle.text }) : null;
   return `КОМБИНАЦИЯ ${idx + 1}:
-Персона: ${persona ? `[${persona.code}] «${persona.text}» — обращение к аудитории дословно` : "без прямого обращения к аудитории (персона не задана)"}
+Персона: ${persona ? `[${persona.code}] «${persona.text}» — ${roleOf(combo) === "interviewee" ? "это ИСТОРИЯ ОТ ПЕРВОГО ЛИЦА, а концепция — интервью: её дословно произносит СОБЕСЕДНИК (один из отвечающих), ведущий ролик открывает хуком и персону не читает" : "обращение к аудитории дословно"}` : "без прямого обращения к аудитории (персона не задана)"}
 Актёр: ${actor ? `[${actor.code}] ${actor.name} (${actor.kind === "real" ? "реальный человек" : "ИИ-персонаж"}${actor.gender ? `, ${actor.gender}` : ""})${actor.description ? ` — ${actor.description}` : ""}` : combo.actorCode ? `[${combo.actorCode}]` : "не задан — опиши персонажа сам в ПАРАМЕТРАХ"}
 Хук [${hook?.code}]: «${hook?.text}»${sc(combo.hookId)}
-Боди [${body?.code}]: «${body?.text}»${sc(combo.bodyId)}
+Боди [${body?.code}]: «${body?.text}»${sc(combo.bodyId)}${body && deixisRef(body.text) ? `\nВНИМАНИЕ: боди отсылает к человеку/событию вне кадра («${deixisRef(body.text)}»). Сцена ПЕРЕД боди вводит этого человека одной фразой-связкой говорящего (кто, когда: «Недавно мне позвонила женщина, лет 45, пять лет на уборке») или вставкой на экране (экран телефона, плашка «звонок»); только потом боди дословно. «И я также» / «что я также» должно быть ясно из следующей же фразы боди — не оставлять висеть.` : ""}
 Энгл [${angle?.code}]: «${angle?.text}»${sc(combo.angleId)}${ov?.text ? `\n${ov.text}` : ""}${execOf(combo)}`;
 }).join("\n\n")}
 
@@ -399,9 +437,11 @@ CTA-кнопка: [текст + цвет]
           const msgStream = client.messages.stream({
             model: "claude-fable-5-1",
             ...(briefSystem ? { system: briefSystem } : {}),
-            // fullBrief в формате ru-video-brief ≈ 4–6k tokens, плюс у Fable 5.1 часть бюджета уходит в thinking-блок:
-            // при 8k были обрывы (stop_reason=max_tokens, блоки thinking+tool_use без текста). Берём 16k.
-            max_tokens: 24000,
+            // fullBrief в формате ru-video-brief ≈ 4–6k tokens, но у Fable 5.1 thinking всегда включён и считается в max_tokens:
+            // при 24k ловили stop_reason=max_tokens (thinking + обрезанный tool_use) — 21.10.2026. Стрим → можно 64k (рекомендация SDK);
+            // глубина мышления — только через output_config.effort (budget_tokens у этой модели нет).
+            max_tokens: 64000,
+            output_config: { effort: "medium" },
             tools: [{
               name: "generate_briefs",
               description: "Сгенерировать адаптированные брифы для каждой комбинации",
@@ -458,11 +498,14 @@ CTA-кнопка: [текст + цвет]
               const dialog = /сценка|диалог/i.test(result.fullBrief.slice(0, 1500));
               let lint = lintSpeech(extractSpeech(result.fullBrief), { protectedTexts, dialog });
               lint.issues.push(...lintScenes(result.fullBrief));
+              const actorG = (() => { const a = combo.actorCode ? actorByCode.get(combo.actorCode.toUpperCase()) : undefined; return a?.gender === "f" || a?.gender === "m" ? a.gender : null; })();
+              const genderIssue = (brief: string): string[] => { const g = detectSpeechGender(extractSpeech(brief)); return actorG && g && g !== actorG ? [`речь от ${genderLabel(g)} лица, а актёр ${combo.actorCode} — ${genderLabel(actorG)} пол: связки и подача должны быть в роде актёра`] : []; };
+              lint.issues.push(...genderIssue(result.fullBrief));
               let pass = 1;
               if (lint.issues.length) {
                 try {
                   const fix = await client.messages.create({
-                    model: "claude-fable-5-1", max_tokens: 16000,
+                    model: "claude-fable-5-1", max_tokens: 32000, output_config: { effort: "medium" },
                     ...(briefSystem ? { system: briefSystem } : {}),
                     messages: [{ role: "user", content: `Ниже бриф на видео. Линтер нашёл красные пункты — перепиши таблицу «СЦЕНАРИЙ» (и при необходимости хук), чтобы снять замечания: «слов больше бюджета» — вырезай связки, вводные, итоги и повторы, формулировки не трогай (если не влезает даже так — подними хронометраж до 60 с); «монтаж дробный» — объединяй соседние сцены в 5–7-секундные с одной мыслью; «повтор мысли» — оставь мысль один раз (энгл, уже прозвучавший в боди, второй раз не читать); «кадры повторяются» — смени план/ракурс или локацию. Формулировки параметров (хук/боди/энгл/персона) — неизменяемый текст, их не трогать. Структуру и остальные секции сохрани. Верни бриф целиком, без комментариев.
 
@@ -476,12 +519,13 @@ ${lint.warns.length ? `\nЖЁЛТЫЕ (по возможности):\n${lint.war
 ${result.fullBrief}` }],
                   });
                   const fixed = fix.content.filter(b => b.type === "text").map(b => (b as { text?: string }).text ?? "").join("").trim();
-                  if (fixed.length > 200) { result.fullBrief = fixed; lint = lintSpeech(extractSpeech(fixed), { protectedTexts, dialog }); lint.issues.push(...lintScenes(fixed)); pass = 2; }
+                  if (fixed.length > 200) { result.fullBrief = fixed; lint = lintSpeech(extractSpeech(fixed), { protectedTexts, dialog }); lint.issues.push(...lintScenes(fixed), ...genderIssue(fixed)); pass = 2; }
                 } catch (e) { console.warn("[gen-briefs] lint-fix pass failed:", e instanceof Error ? e.message : e); }
               }
               result.fullBrief = `${result.fullBrief.trim()}\n\n---\n\n${formatLintBlock(lint, pass)}`;
             }
             const brief = {
+              slotId: combo.slotId ?? null,
               personaId: combo.personaId,
               hookId: combo.hookId,
               bodyId: combo.bodyId,
@@ -500,31 +544,37 @@ ${result.fullBrief}` }],
 
         // Concurrent с лимитом 4. С BATCH=1 — нагрузка per-call мала,
         // 4 параллельных уверенно не упираются в Anthropic TPM.
-        const CONCURRENCY = 6; // пак ≤ 6 брифов уходит одним раундом (бриф с линтер-правкой — до ~6 мин); maxDuration 800
+        const CONCURRENCY = 6; // часть ≤ 4 слотов уходит одним раундом (бриф с линтер-правкой — до ~7 мин); maxDuration 800
         const errors: string[] = [];
         const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+        // Бюджет функции (maxDuration 800 с): всё, что не успели, отдаём как «догенерировать», а не умираем молча (21.10.2026)
+        const DEADLINE = Date.now() + 760_000;
+        const remaining = () => DEADLINE - Date.now();
+        const slotLabel = (batch: typeof combinations) => batch.map(c => (c.slotId != null ? `слот ${c.slotId}` : refById[c.hookId]?.code ?? "?")).join(", ");
         const wrapped = async (batch: typeof combinations, idx: number) => {
           for (let attempt = 1; attempt <= 3; attempt++) {
+            if (remaining() < 150_000) { errors.push(`${slotLabel(batch)}: не осталось времени в лимите функции (800 с) — нажми «Догенерировать недостающие»`); return; }
             try {
               // Hard timeout на один бриф (генерация + линтер-правка) — чтобы зависший
-              // запрос не блокировал worker'а и не съедал maxDuration.
+              // запрос не блокировал worker'а и не съедал maxDuration; не длиннее остатка бюджета.
+              const callTimeout = Math.min(720_000, remaining() - 20_000); // генерация 3–5 мин + правка линтера 1–2 мин: 400 с не хватало (21.10.2026)
               await Promise.race([
                 processBatch(batch, idx),
                 new Promise<never>((_, rej) =>
-                  setTimeout(() => rej(new Error(`per-call timeout 400s`)), 400_000)
+                  setTimeout(() => rej(new Error(`per-call timeout ${Math.round(callTimeout / 1000)}s`)), callTimeout)
                 ),
               ]);
               return;
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
               const isRateLimit = /429|rate.?limit|overload/i.test(msg);
-              if (attempt < 3 && isRateLimit) {
+              if (attempt < 3 && isRateLimit && remaining() > 300_000) {
                 console.warn(`[gen-briefs] batch ${idx} attempt ${attempt} rate-limited, retry`);
                 await sleep(2000 * attempt);
                 continue;
               }
               console.error(`[gen-briefs] batch ${idx} failed (attempt ${attempt}):`, msg);
-              errors.push(`batch ${idx}: ${msg}`);
+              errors.push(`${slotLabel(batch)}: ${msg}`);
               return;
             }
           }
@@ -535,6 +585,7 @@ ${result.fullBrief}` }],
           while (queue.length > 0) {
             const item = queue.shift();
             if (!item) break;
+            if (remaining() < 150_000) { errors.push(`${slotLabel(item.batch)}: не осталось времени в лимите функции (800 с) — нажми «Догенерировать недостающие»`); continue; }
             await wrapped(item.batch, item.idx);
           }
         });
@@ -553,9 +604,11 @@ ${result.fullBrief}` }],
             __warning: `${errors.length} батч(ей) с ошибками: ${errors.join("; ")}`,
           }) + "\n"));
         }
+        controller.enqueue(encoder.encode(JSON.stringify({ __done: true, briefs: done, errors: errors.length }) + "\n"));
       } catch (e) {
         controller.enqueue(encoder.encode(JSON.stringify({ __error: e instanceof Error ? e.message : String(e) }) + "\n"));
       } finally {
+        clearInterval(heartbeat);
         controller.close();
       }
     },

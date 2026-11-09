@@ -600,6 +600,15 @@ function BriefsContent() {
   // Генерация частями по 5 слотов: один бриф с линтер-правкой — до ~6 мин, функция Vercel живёт 800 с,
   // поэтому пак на 20 идёт четырьмя запросами подряд. mode "missing" — догенерировать только слоты без брифа.
   const generatingRef = useRef(false); // защита от двойного запуска (автостарт + клик, два эффекта)
+  const autoPassRef = useRef(0);       // счётчик автоматических проходов «догенерировать недостающие»
+  // Недостающие слоты: по slot_id брифа (с 21.10.2026); у старых брифов без slot_id — по разнице количества
+  const missingCount = (() => {
+    const slots = session?.packMetadata?.slots ?? [];
+    if (!slots.length) return 0;
+    if (briefs.some(b => b.slotId == null)) return Math.max(0, slots.length - briefs.length);
+    const covered = new Set(briefs.map(b => b.slotId));
+    return slots.filter(s => !covered.has(s.slotId)).length;
+  })();
   const handleGenerate = async (mode: "all" | "missing" = "all") => {
     if (!session || generatingRef.current) return;
     generatingRef.current = true;
@@ -611,7 +620,7 @@ function BriefsContent() {
     try {
       const rules = await ruleStore.getAll();
       const slotIds = (session.packMetadata?.slots ?? []).map(s => s.slotId);
-      const CHUNK = 5;
+      const CHUNK = 4; // бриф = 3–7 мин; 4 параллельных уверенно укладываются в 800 с функции
       const chunks: (number[] | null)[] = slotIds.length ? Array.from({ length: Math.ceil(slotIds.length / CHUNK) }, (_, i) => slotIds.slice(i * CHUNK, (i + 1) * CHUNK)) : [null];
       let doneBriefs = 0;
       const total = slotIds.length || 1;
@@ -631,6 +640,7 @@ function BriefsContent() {
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
+          let sawDone = false; // сервер закрыл поток штатно; иначе функцию убил лимит 800 с и часть слотов молча пропала
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -643,13 +653,16 @@ function BriefsContent() {
               try { obj = JSON.parse(line); } catch { chunkErrors.push(`часть ${ci + 1}: сервер прислал не JSON — ${line.slice(0, 120)}`); continue; }
               if (obj.__error) throw new Error(String(obj.__error));
               if (obj.__warning) { setError(prev => (prev ? prev + "\n" : "") + `⚠ ${obj.__warning}`); continue; }
-              if ("__progress" in obj) continue; // прогресс считаем по брифам всего пака, а не по чанку
+              if ("__heartbeat" in obj || "__started" in obj) continue; // пульс потока
+              if ("__done" in obj) { sawDone = true; continue; }
+              if ("__progress" in obj) { if (obj.__progress === 100 && doneBriefs === 0 && !chunk) sawDone = true; continue; } // прогресс считаем по брифам всего пака, а не по чанку
               const saved = await briefStore.saveMany([{ ...(obj as unknown as Omit<Brief, "id" | "createdAt" | "sessionId">), sessionId: session.id }]);
               setBriefs(prev => [...prev, ...saved]);
               doneBriefs++;
               setProgress(Math.min(99, Math.round((doneBriefs / total) * 100)));
             }
           }
+          if (!sawDone) chunkErrors.push(`часть ${ci + 1}: поток оборвался до конца (лимит времени функции 800 с) — слоты без брифа добери кнопкой`);
         } catch (e) {
           // ошибка одной части не рвёт пак: идём к следующей, недостающее добирается кнопкой
           chunkErrors.push(`часть ${ci + 1}: ${e instanceof Error ? e.message : String(e)}`);
@@ -659,7 +672,21 @@ function BriefsContent() {
       setPipelineStatus(null);
       if (chunkErrors.length) setError(prev => (prev ? prev + "\n" : "") + `⚠ Не все части сгенерировались: ${chunkErrors.join("; ")}. Нажми «Догенерировать недостающие».`);
       // перечитываем из БД — состояние вкладки могло разойтись с базой (параллельный запуск, другая вкладка)
-      setBriefs(await briefStore.getBySession(session.id));
+      const fresh = await briefStore.getBySession(session.id);
+      setBriefs(fresh);
+      // Самодобор (21.10.2026): если слоты остались без брифа из-за времени/обрыва — ещё до двух проходов «недостающие» автоматически
+      const slotsAll = session.packMetadata?.slots ?? [];
+      const covered = new Set(fresh.map(b => b.slotId));
+      const left = slotsAll.filter(s => !covered.has(s.slotId)).length;
+      const timeRelated = chunkErrors.length === 0 || chunkErrors.every(e => /врем|оборвал|timeout|лимит/i.test(e));
+      if (left > 0 && slotsAll.length > 0 && timeRelated && (autoPassRef.current < 2)) {
+        autoPassRef.current += 1;
+        generatingRef.current = false;
+        setError(prev => (prev ? prev + "\n" : "") + `⏳ Без брифа осталось ${left} слот(ов) — автоматически добираю (проход ${autoPassRef.current} из 2)…`);
+        await handleGenerate("missing");
+        return;
+      }
+      autoPassRef.current = 0;
 
       await sessionStore.update(session.id, { status: "done" });
       setSession(prev => prev ? { ...prev, status: "done" } : prev);
@@ -754,7 +781,7 @@ function BriefsContent() {
             {briefs.length > 0 && <a href={`/api/briefs/docx?sessionId=${session?.id ?? ""}`} target="_blank" rel="noreferrer"><Button>📄 ТЗ в DOCX (все {briefs.length})</Button></a>}
             {briefs.length > 0 && <a href={`/api/briefs/gdoc?sessionId=${session?.id ?? ""}`} target="_blank" rel="noreferrer" title="Собрать ТЗ и открыть в Google Docs (документ переиспользуется, ссылка постоянная)"><Button>📝 Google Docs (все)</Button></a>}
             {briefs.length > 0 && (session?.packMetadata?.slots?.length ?? 0) > briefs.length && !generating && (
-              <span title="Сгенерировать только слоты, у которых ещё нет брифа"><Button onClick={() => handleGenerate("missing")}>➕ Догенерировать недостающие ({(session?.packMetadata?.slots?.length ?? 0) - briefs.length})</Button></span>
+              <span title="Сгенерировать только слоты, у которых ещё нет брифа"><Button onClick={() => handleGenerate("missing")}>➕ Догенерировать недостающие ({missingCount})</Button></span>
             )}
             <Button variant="primary" onClick={() => handleGenerate("all")} disabled={generating}>
               {generating ? `⏳ ${progress}%` : briefs.length > 0 ? "🔄 Перегенерировать" : "✨ Генерировать брифы"}

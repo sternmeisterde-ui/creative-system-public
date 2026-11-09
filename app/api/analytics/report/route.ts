@@ -25,7 +25,7 @@ import { computeCombinations } from "@/lib/combinations";
 import { fetchAll } from "@/lib/paged";
 import { matchesProduct, isProduct, productMeta, type Product } from "@/lib/product";
 import type {
-  ReportKpi, ReportVisual, ReportSignal, ReportHookSignal, ReportFamily, ReportCombo, ReportCompetitor,
+  ReportKpi, ReportVisual, ReportCrossSignal, ReportSignal, ReportHookSignal, ReportFamily, ReportCombo, ReportCompetitor,
   ReportVerification, ReportVerifications,
 } from "@/lib/types";
 
@@ -274,7 +274,23 @@ export async function POST(req: NextRequest) {
     .slice(0, 8)
     .map(({ title, type, hook }) => ({ title, type, hook }));
 
-  const visual: ReportVisual = { helps, hurts, families, combos, competitors, hookHelps, hookHurts };
+  // Не-Meta отчёт: те же коды формулировок в Meta за весь срок — воспроизводится ли сигнал между каналами (прокладка Google → коды, 06.11.2026)
+  let crossChannel: ReportCrossSignal[] | undefined;
+  if (platform !== "meta" && platform !== "all") {
+    const metaQs = ["platform=meta", product !== "all" ? `product=${product}` : null].filter(Boolean).join("&");
+    const metaBiv = await fetchJson<{ results: BivResult[] }>(`${base}/api/analytics/bivariate?${metaQs}`).catch(() => null);
+    const metaBy = new Map((metaBiv?.results ?? []).map(r => [r.code, r]));
+    const rank = (v: string) => (v === "HELPS" || v === "HURTS" ? 0 : 1);
+    crossChannel = bivResults.filter(r => /^[MB][PHBA]\d{6}$/.test(r.code) && metaBy.has(r.code))
+      .map(r => { const m = metaBy.get(r.code)!; return {
+        code: r.code, paramType: r.paramType, label: r.label ?? r.code,
+        channel: { verdict: r.verdict, ratio: r.ratio, adCount: r.withCount ?? 0, cpl: r.withCpl ?? null },
+        meta: { verdict: m.verdict, ratio: m.ratio, adCount: m.withCount ?? 0, cpl: m.withCpl ?? null },
+      }; })
+      .sort((a, b) => rank(a.channel.verdict) + rank(a.meta.verdict) - rank(b.channel.verdict) - rank(b.meta.verdict) || b.channel.adCount - a.channel.adCount)
+      .slice(0, 20);
+  }
+  const visual: ReportVisual = { helps, hurts, families, combos, competitors, hookHelps, hookHurts, crossChannel };
 
   // 4. Описания крео (Gemini, mode=creative_desc) — контент для контекста нарратива
   const { data: descRows } = await supabase
@@ -291,7 +307,7 @@ export async function POST(req: NextRequest) {
   const narrative = await buildNarrative({ flow, platform, product, period, business, settings, perf, kpi, visual, descriptions, hookHelps, hookHurts, labelOf });
 
   // 5. Две независимые проверки (Gemini + Codex/OpenAI) — аудит чисел и выводов
-  const verifications = await buildVerifications({ settings, kpi, visual, perf, narrative, period, product });
+  const verifications = await buildVerifications({ settings, kpi, visual, perf, narrative, period, product, platform });
 
   // 6. Сохранить снапшот (+ строки виннеров/fake/лузеров — на них строится конструктор)
   const snapshot = {
@@ -349,7 +365,8 @@ async function buildNarrative(args: {
   const eur = (v: number | null) => (v == null ? "—" : `€${v.toFixed(1)}`);
   const sig = (s: ReportSignal) => `\n  • ${s.code} [${AX[s.paramType] ?? s.paramType}, ${s.adCount ?? "?"} крео: ${(s.ads ?? []).slice(0, 5).join(", ") || "—"}; CPL ${eur(s.withCpl ?? null)} vs ${eur(s.withoutCpl ?? null)} у остальных, ×${s.ratio?.toFixed(2) ?? "—"}]${q(s.code)}`;
 
-  const prompt = `Ты — аналитик Meta Ads для ${business.name}. Готовишь ЕДИНЫЙ отчёт по всему массиву креативов перед запуском нового пакета.
+  const channelLabel = platform === "all" ? "перфоманс-рекламы (Meta + Google + TikTok)" : platform === "meta" ? "Meta Ads" : platform === "google" ? "Google Ads" : platform === "tiktok" ? "TikTok Ads" : platform;
+  const prompt = `Ты — аналитик ${channelLabel} для ${business.name}. Канал отчёта — ${channelLabel}; общий контекст бизнеса ниже может упоминать другие каналы, это не ошибка данных. Готовишь ЕДИНЫЙ отчёт по всему массиву креативов перед запуском нового пакета.
 
 ${getAiContext()}
 
@@ -376,7 +393,7 @@ ${losers.slice(0, 10).map(r => `• ${r.ad_name} | CPL ${eur(r.cpl)} | €${num(
 ## ФОРМУЛИРОВКИ — что помогает / вредит (бивариат по всему массиву)
 Каждый код = ОДНА уникальная ДОСЛОВНАЯ формулировка (текст в кавычках — ровно то, что звучит/написано в креативе). Это не категории и не направления: анализируй и называй именно эти тексты.
 HELPS (снижают CPL):${visual.helps.map(sig).join("") || " —"}
-HURTS (повышают CPL):${visual.hurts.map(sig).join("") || " —"}
+HURTS (повышают CPL):${visual.hurts.map(sig).join("") || " —"}${visual.crossChannel?.length ? `\nТЕ ЖЕ КОДЫ В META (весь срок) — воспроизвёлся ли сигнал:${visual.crossChannel.map(x => `\n  • ${x.code} [${AX[x.paramType] ?? x.paramType}] здесь ${x.channel.verdict}${x.channel.ratio != null ? ` ×${x.channel.ratio.toFixed(2)}` : ""} (${x.channel.adCount} крео) · Meta ${x.meta.verdict}${x.meta.ratio != null ? ` ×${x.meta.ratio.toFixed(2)}` : ""} (${x.meta.adCount} крео) «${x.label.slice(0, 90)}»`).join("")}\nЛиды по креативам Google PMax — оценка (CRM-лиды кампании разложены по конверсиям Google), вердикты здесь слабее, чем в Meta.` : ""}
 
 ## HOOK RATE — что цепляет (плеи/показы, ВЫШЕ=лучше; ×N = vs остальные)
 Цепляют:${hookHelps.map(h => `\n  • ${h.code} [${AX[h.paramType] ?? h.paramType}, hook ${h.hookRate?.toFixed(1) ?? "—"}%, ×${h.ratio?.toFixed(2) ?? "—"}]${q(h.code)}`).join("") || " —"}
@@ -439,7 +456,8 @@ ${visual.competitors.map(c => `• [${c.type ?? "—"}] ${c.title}${c.hook ? ` �
 
 // ── Проверка отчёта: 2 независимые модели (Gemini + Codex/OpenAI) ───────────────
 
-const AUDIT_INSTRUCTION = `Ты — независимый аудитор отчёта по Meta Ads. Дан ДЕТЕРМИНИРОВАННЫЙ свод чисел и текстовый разбор (написан ДРУГОЙ моделью). Проверяй КОРРЕКТНОСТЬ строго по ПРАВИЛАМ КЛАССИФИКАЦИИ, приведённым в контексте, — НЕ по своей наивной эвристике.
+const AUDIT_LABEL: Record<string, string> = { all: "всем каналам (Meta + Google + TikTok)", meta: "Meta Ads", google: "Google Ads", tiktok: "TikTok Ads" };
+const auditInstruction = (platform: string) => `Ты — независимый аудитор отчёта по ${AUDIT_LABEL[platform] ?? platform}. КАНАЛ ОТЧЁТА — ${AUDIT_LABEL[platform] ?? platform}: упоминание других каналов в общем контексте бизнеса или в терминах (hook rate, плейсменты) — НЕ ошибка и НЕ issue; ошибкой считай только расхождение чисел и статусов с данными. Дан ДЕТЕРМИНИРОВАННЫЙ свод чисел и текстовый разбор (написан ДРУГОЙ моделью). Проверяй КОРРЕКТНОСТЬ строго по ПРАВИЛАМ КЛАССИФИКАЦИИ, приведённым в контексте, — НЕ по своей наивной эвристике.
 
 ВАЖНО (частые ложные срабатывания — НЕ считай это ошибками):
 - ROAS = 0 у МОЛОДОГО ада (age < порога зрелости) — ЭТО НОРМА: цикл сделки 14–30 дней, выручка ещё не дозрела. Молодой winner с ROAS 0 классифицирован ВЕРНО.
@@ -513,9 +531,11 @@ async function buildVerifications(args: {
   kpi: ReportKpi; visual: ReportVisual; perf: PerfRow[]; narrative: string;
   period?: { from: string; to: string } | null;
   product?: Product;
+  platform?: string;
 }): Promise<ReportVerifications> {
   const ctx = buildAuditContext(args);
-  const checks = await Promise.all([verifyWithGemini(AUDIT_INSTRUCTION, ctx), verifyWithCodex(AUDIT_INSTRUCTION, ctx)]);
+  const instr = auditInstruction(args.platform ?? "all");
+  const checks = await Promise.all([verifyWithGemini(instr, ctx), verifyWithCodex(instr, ctx)]);
   const overall: ReportVerifications["overall"] = checks.some(c => c.status === "fail") ? "fail" : checks.some(c => c.status === "warning") ? "warning" : "ok";
   return { overall, checks };
 }

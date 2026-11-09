@@ -1,7 +1,8 @@
 // ── Данные для движка пака (lib/pack-engine.ts): маппинг, формулировки, концепции, актёры, использование ──
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AdNameMapping } from "@/lib/naming";
-import { loadFormulations, type Formulation, type FormulationProduct } from "@/lib/formulations";
+import { loadFormulations, ensureFormulation, type Formulation, type FormulationProduct } from "@/lib/formulations";
+import { outdatedIn, applyNorms } from "@/lib/norms";
 import type { EngineConcept, EngineActor, EngineRow, Medium } from "@/lib/pack-engine";
 import { matchesProduct } from "@/lib/product";
 import { propagateCopyMappings } from "@/lib/mapping-copies";
@@ -15,6 +16,7 @@ export interface EngineData {
   labels: Record<string, string>;   // код → текст формулировки / имя концепции / имя актёра (для UI и ТЗ)
   medium: Record<string, Medium>;   // ad_name → видео | статика (по meta_creatives)
   lifetimeRows: EngineRow[];        // весь срок, Meta, только этот продукт — уровень B сигналов
+  successors: Record<string, string>; // устаревшая формулировка → преемник с новой нормой (lib/norms.ts)
 }
 
 export async function loadEngineData(sb: SupabaseClient, product: FormulationProduct): Promise<EngineData> {
@@ -28,14 +30,14 @@ export async function loadEngineData(sb: SupabaseClient, product: FormulationPro
   const [formulations, conceptsRes, actorsRes] = await Promise.all([
     loadFormulations(sb, { product }),
     sb.from("concepts").select("code, name, category, is_ours").order("code"),
-    sb.from("actors").select("code, name, kind").order("kind").order("code"),
+    sb.from("actors").select("code, name, kind, gender").order("kind").order("code"),
   ]);
   // медиа крео: видео, если есть video_id или object_type VIDEO; иначе статика
   const medium: Record<string, Medium> = {};
   for (let from = 0; ; from += 1000) {
     const { data } = await sb.from("meta_creatives").select("ad_name, video_id, object_type, platform").order("ad_id").range(from, from + 999);
     for (const c of (data ?? []) as { ad_name: string; video_id: string | null; object_type: string | null; platform: string | null }[]) {
-      if (c.platform === "google") continue;
+      // Google (05.11.2026): ассеты PMax/YouTube тоже получают медиа — video_id = ролик YouTube, IMAGE = статика; коды им даёт /mapping/google
       const isVideo = !!c.video_id || c.object_type === "VIDEO";
       if (isVideo || !medium[c.ad_name]) medium[c.ad_name] = isVideo ? "video" : "static";
     }
@@ -59,10 +61,23 @@ export async function loadEngineData(sb: SupabaseClient, product: FormulationPro
   for (const r of mappingRows) for (const c of [r.persona_code, r.hook_code, r.body_code, r.angle_code, r.concept_code, r.actor_code]) if (c) usage[c] = (usage[c] ?? 0) + 1;
   const concepts: EngineConcept[] = ((conceptsRes.data ?? []) as { code: string | null; name: string; category: string | null; is_ours: boolean }[])
     .filter(c => c.code).map(c => ({ code: c.code as string, name: c.name, category: c.category, isOurs: !!c.is_ours }));
-  const actors: EngineActor[] = ((actorsRes.data ?? []) as { code: string; name: string; kind: string }[]).map(a => ({ code: a.code, name: a.name, kind: a.kind }));
+  const actors: EngineActor[] = ((actorsRes.data ?? []) as { code: string; name: string; kind: string; gender: string | null }[]).map(a => ({ code: a.code, name: a.name, kind: a.kind, gender: a.gender === "f" || a.gender === "m" ? a.gender : null }));
+  // Устаревшие факты (brief.config.ts → outdated_claims): преемник создаётся лениво, один раз, с parent_code
+  const successors: Record<string, string> = {};
+  for (const f of [...formulations]) {
+    const claim = outdatedIn(f.text, product);
+    if (!claim) continue;
+    const text = applyNorms(f.text, product);
+    if (text === f.text) continue;
+    try {
+      const { formulation: nf } = await ensureFormulation(sb, { axis: f.axis, product, text, source: "norm-update", parentCode: f.code, note: `Преемник ${f.code}: ${claim.note}` });
+      successors[f.code] = nf.code;
+      if (!formulations.some(x => x.code === nf.code)) formulations.push(nf);
+    } catch { /* нет преемника — слот с этой формулировкой снимет движок */ }
+  }
   const labels: Record<string, string> = {};
   for (const f of formulations) labels[f.code] = f.text;
   for (const c of concepts) labels[c.code] = c.name;
   for (const a of actors) labels[a.code] = a.name;
-  return { mapping, formulations, concepts, actors, usage, labels, medium, lifetimeRows };
+  return { mapping, formulations, concepts, actors, usage, labels, medium, lifetimeRows, successors };
 }

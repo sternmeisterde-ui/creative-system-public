@@ -70,7 +70,7 @@ export function getBrandVoice() {
 export function getAiSystemPreamble(targets: { cpl: number; cpql: number; minImpressions: number }): string {
   const v = brief.brand_voice;
   const lines = [
-    `Ты — аналитик Meta Ads для ${brief.business.name}.`,
+    `Ты — аналитик перфоманс-рекламы (Meta Ads, Google Ads, TikTok Ads) для ${brief.business.name}.`,
     brief.ai_context,
     `Цели: CPL ≤ €${targets.cpl}, CPQL ≤ €${targets.cpql}, порог значимости ${targets.minImpressions} показов.`,
     `Голос бренда: ${v.tone}.`,

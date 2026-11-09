@@ -140,6 +140,7 @@ export interface Brief {
   status: BriefStatus;
   revisionNote?: string;
   batchIndex?: number;
+  slotId?: number | null;      // слот пака (с 21.10.2026) — ключ «догенерировать недостающие»
   createdAt: string;
 }
 
@@ -400,6 +401,14 @@ export interface ReportVisual {
   competitors: ReportCompetitor[];
   hookHelps?: ReportHookSignal[];
   hookHurts?: ReportHookSignal[];
+  crossChannel?: ReportCrossSignal[]; // Google/TikTok-отчёт: тот же код в Meta (весь срок) — воспроизвёлся ли сигнал
+}
+
+/** Код формулировки в двух каналах: вердикт бивариата в канале отчёта и в Meta за весь срок (06.11.2026). */
+export interface ReportCrossSignal {
+  code: string; paramType: string; label: string;
+  channel: { verdict: string; ratio: number | null; adCount: number; cpl: number | null };
+  meta: { verdict: string; ratio: number | null; adCount: number; cpl: number | null };
 }
 
 // ── Проверка отчёта независимыми моделями (Gemini + Codex/OpenAI) ───────────────

@@ -10,6 +10,8 @@
 // Сигналы и доноры берутся ТОЛЬКО из медиа пака (видео ↔ видео, статика ↔ статика): текст из статики в видео — другой параметр.
 // Никаких догадок модели: выбор по бивариату и архиву, обоснование — шаблон. Внешние гипотезы (конкуренты, уровень D) — отдельный процесс.
 import { parseAdNameWithMapping, type AdNameMapping } from "@/lib/naming";
+import { formulationsGender, genderLabel } from "./text-gender";
+import { slotCoherenceIssue, personaRole } from "./topic-fit";
 import { computeBivariate, type BivariateResult } from "@/lib/bivariate";
 import { isFormulationCode, type Axis, type Formulation } from "@/lib/formulations";
 import type { Format, PackSlot, PackSlotCategory } from "@/lib/types";
@@ -18,7 +20,7 @@ export type Medium = "video" | "static";
 export type Tier = "A" | "B" | "C";
 export interface EngineRow { ad_name: string; auto_status: string; spend: number; cpl: number | null; cpql: number | null; leads: number; last_seen?: string | null }
 export interface EngineConcept { code: string; name: string; category: string | null; isOurs: boolean }
-export interface EngineActor { code: string; name: string; kind: string }
+export interface EngineActor { code: string; name: string; kind: string; gender?: "f" | "m" | null }
 
 export interface EngineInput {
   format: Format;
@@ -36,6 +38,7 @@ export interface EngineInput {
   blockedConcepts?: string[];
   actorPool?: string[] | null;
   actorKind?: "ai" | "real" | null;
+  successors?: Record<string, string>; // устаревшая формулировка → преемник (норма фактов продукта)
   transfer?: boolean;                // категория «перенос медиа» (по умолчанию да)
   shares?: { scale: number; family: number; explore: number; transfer: number };
 }
@@ -64,6 +67,12 @@ export const mediumOfFormat = (f: Format): Medium => (f === "static" ? "static" 
 const RECENT_DAYS = 90;
 
 export function designPack(inp: EngineInput): EngineResult {
+  // ── Нормы фактов продукта (04.11.2026): преемник подставляется ДО сборки — в маппинг, виннеров, сигналы.
+  // Раньше код менялся в готовом слоте, и «было» виннера (MA505531) расходилось со «стало» слота (MA758818):
+  // проверка пака трижды подряд валила семьи как «два изменения». Теперь старый код нигде не всплывает.
+  const succ = inp.successors ?? {};
+  const norm = (c: string | null | undefined): string | null => (c ? (succ[c] ?? c) : null);
+  if (Object.keys(succ).length) inp = { ...inp, mapping: inp.mapping.map(m => ({ ...m, personaCode: norm(m.personaCode), hookCode: norm(m.hookCode), bodyCode: norm(m.bodyCode), angleCode: norm(m.angleCode) })) };
   const shares = inp.shares ?? { scale: 0.45, family: 0.25, explore: 0.2, transfer: 0.1 };
   const useTransfer = inp.transfer ?? true;
   const blocked = new Set((inp.blockedConcepts ?? DEFAULT_BLOCKED_CONCEPTS).map(c => c.toUpperCase()));
@@ -80,20 +89,29 @@ export function designPack(inp: EngineInput): EngineResult {
   const rowsMed = inp.rows.filter(r => medOf(r.ad_name) === medium);
   const rowsOther = inp.rows.filter(r => medOf(r.ad_name) === otherMedium);
   const biv = toBiv(rowsMed);
+  // Сигналы по кодам-преемникам: имена объявлений несут устаревшие коды (MA505531), а парсер имени сильнее маппинга,
+  // поэтому результаты бивариата приводим к преемникам здесь (дубль кода после приведения — оставляем сильнее по числу крео)
+  const normBiv = (res: BivariateResult[]): BivariateResult[] => {
+    const byC = new Map<string, BivariateResult>();
+    for (const r of res) { const code = norm(r.code) ?? r.code; const cur = byC.get(code); if (!cur || r.withCount > cur.withCount) byC.set(code, code === r.code ? r : { ...r, code }); }
+    return [...byC.values()];
+  };
+  const bivResults = normBiv(biv.results);
   const isTextHelps = (r: BivariateResult) => r.verdict === "HELPS" && AXES4.includes(r.paramType as Axis) && isFormulationCode(r.code);
-  const helps = biv.results.filter(isTextHelps).sort((a, b) => Number(b.withCount >= 2) - Number(a.withCount >= 2) || (a.ratio ?? 9) - (b.ratio ?? 9));
-  const hurts = biv.results.filter(r => r.verdict === "HURTS");
+  const helps = bivResults.filter(isTextHelps).sort((a, b) => Number(b.withCount >= 2) - Number(a.withCount >= 2) || (a.ratio ?? 9) - (b.ratio ?? 9));
+  const hurts = bivResults.filter(r => r.verdict === "HURTS");
   const hurtSet = new Set(hurts.map(r => r.code));
-  const helpsConcepts = biv.results.filter(r => r.verdict === "HELPS" && r.paramType === "concept" && !blocked.has(r.code.toUpperCase())).sort((a, b) => (a.ratio ?? 9) - (b.ratio ?? 9));
+  const helpsConcepts = bivResults.filter(r => r.verdict === "HELPS" && r.paramType === "concept" && !blocked.has(r.code.toUpperCase())).sort((a, b) => (a.ratio ?? 9) - (b.ratio ?? 9));
 
   const lifeMed = (inp.lifetimeRows ?? []).filter(r => medOf(r.ad_name) === medium);
   const lifeBiv = lifeMed.length ? toBiv(lifeMed) : null;
+  const lifeResults = lifeBiv ? normBiv(lifeBiv.results) : [];
   const recentCut = Date.now() - RECENT_DAYS * 864e5;
   const recentNames = new Set(lifeMed.filter(r => r.last_seen && new Date(r.last_seen).getTime() >= recentCut).map(r => r.ad_name));
   const codesOfRecent = new Set<string>();
   for (const m of inp.mapping) if (recentNames.has(m.adName)) for (const c of [m.personaCode, m.hookCode, m.bodyCode, m.angleCode]) if (c) codesOfRecent.add(c);
   const periodCodes = new Set(helps.map(r => r.code));
-  const lifetimeHelps = (lifeBiv?.results ?? []).filter(r => isTextHelps(r) && !periodCodes.has(r.code) && !hurtSet.has(r.code) && codesOfRecent.has(r.code))
+  const lifetimeHelps = lifeResults.filter(r => isTextHelps(r) && !periodCodes.has(r.code) && !hurtSet.has(r.code) && codesOfRecent.has(r.code))
     .sort((a, b) => Number(b.withCount >= 2) - Number(a.withCount >= 2) || (a.ratio ?? 9) - (b.ratio ?? 9));
   const tiers: Record<string, Tier> = {};
   for (const r of helps) tiers[r.code] = r.withCount >= 2 ? "A" : "B";
@@ -104,7 +122,8 @@ export function designPack(inp: EngineInput): EngineResult {
   // ── Виннеры: медиа пака (основа) и другого медиа (доноры переноса), только с полным набором формулировок
   const toWinner = (r: EngineRow): EngineWinner | null => {
     const p = parseAdNameWithMapping(r.ad_name, inp.mapping);
-    const codes = { persona: p.personaCode ?? "", hook: p.hookCode ?? "", body: p.bodyCode ?? "", angle: p.angleCode ?? "" };
+    // коды из имени объявления тоже проходят через преемников (имя может нести устаревший код)
+    const codes = { persona: norm(p.personaCode) ?? "", hook: norm(p.hookCode) ?? "", body: norm(p.bodyCode) ?? "", angle: norm(p.angleCode) ?? "" };
     // персона необязательна (нет прямого обращения → null); хук, боди и энгл — обязательны. Баг 16.10.2026: требование персоны выкидывало всех виннеров без неё.
     if (![codes.hook, codes.body, codes.angle].every(isFormulationCode)) return null;
     if (codes.persona && !isFormulationCode(codes.persona)) codes.persona = "";
@@ -192,7 +211,7 @@ export function designPack(inp: EngineInput): EngineResult {
   }
   const exploreList = medium === "video" ? [...explore] : [];
   const nExploreTarget = Math.round(n * shares.explore);
-  if (exploreList.length && winners.length) {
+  if (exploreList.length && winners.length >= 3) {
     const per = Math.max(3, Math.floor(nExploreTarget / exploreList.length));
     for (const code of exploreList) for (let i = 0; i < per; i++) {
       const w = winners[i % winners.length]; const actorE = nextActor(w.actor, true);
@@ -201,7 +220,7 @@ export function designPack(inp: EngineInput): EngineResult {
         rationale: `Разведка концепции ${code} «${label(code)}» (${inp.usage[code] ?? 0} крео в массиве): тексты виннера ${w.adName} (CPL ${w.cpl?.toFixed(1) ?? "—"} €) дословно${actorE && actorE === w.actor ? " и его актёр" : ""}, чтобы измерить саму концепцию. На концепцию ${per} крео с разными виннерами — минимум для вывода.${actorNote(w, actorE)}`,
       });
     }
-  } else if (exploreList.length) notes.push("Разведку концепций не на чем строить: нет виннеров этого медиа с полными формулировками.");
+  } else if (exploreList.length) notes.push(winners.length ? `Разведка концепций не собрана: виннеров этого медиа с формулировками ${winners.length}, а на концепцию нужно ≥3 слота с РАЗНЫМИ виннерами-основами (${exploreList.join(", ")} ждут третьего виннера).` : "Разведку концепций не на чем строить: нет виннеров этого медиа с полными формулировками.");
 
   // ── 3. Семьи: виннер медиа пака, одна ось, замена уровня A → B → C
   const nFamily = Math.round(n * shares.family);
@@ -275,6 +294,7 @@ export function designPack(inp: EngineInput): EngineResult {
   }
 
   // ── 6. Добор до размера: ещё семьи (уровень C — измерение наших неизмеренных формулировок), когда HELPS и опыление исчерпаны
+  const fillerSlots = new Set<PackSlot>(); // добор снимается первым, если пак не влезает в размер
   guard = 0; wi = 0; axisIdx = 1;
   while (slots.length < n && winners.length && guard++ < n * 12) {
     const w = winners[wi++ % winners.length]; const axis = AXES4[axisIdx++ % 4]; const current = w.codes[axis];
@@ -285,14 +305,82 @@ export function designPack(inp: EngineInput): EngineResult {
       category: "winner_family", codes: { ...w.codes, [axis]: alt.code, concept: conceptOf(w), actor: actorF }, basedOnAd: w.adName, variedParam: axis, helpsCodes: alt.r ? [alt.code] : [], change: { axis, fromCode: current, toCode: alt.code, kind: alt.tier === "C" ? "ours" : "helps", tier: alt.tier },
       rationale: `Семья виннера ${w.adName} (CPL ${w.cpl?.toFixed(1) ?? "—"} €), добор для измерения: меняем только ${axis} → ${alt.code} «${label(alt.code).slice(0, 70)}»${sig}; ${tierLabel(alt.code)}. Остальные три формулировки и ${keptPhrase(w, actorF)}.${actorNote(w, actorF)}`,
     });
-    if (ok) debug.fillers++;
+    if (ok) { debug.fillers++; fillerSlots.add(slots[slots.length - 1]); }
   }
 
   // ── Порядок и номера
+  // ── Род речи ↔ пол актёра (20.10.2026: боди «А потом посчитала…» попало в семью с мужским актёром).
+  // Формулировки от первого лица задают род; актёр другого пола → заменяем на актёра нужного пола из пула,
+  // нет такого или формулировки разного рода → слот снимаем. Пересказ чужой истории от лица другого пола не допускается.
+  if (medium === "video") {
+    const genderOf = new Map(inp.actors.map(a => [a.code, a.gender ?? null]));
+    const byGender: Record<"f" | "m", string[]> = { f: actorPool.filter(a => a.gender === "f").map(a => a.code), m: actorPool.filter(a => a.gender === "m").map(a => a.code) };
+    const gIdx = { f: 0, m: 0 };
+    for (let i = slots.length - 1; i >= 0; i--) {
+      const s = slots[i];
+      const { gender, conflict } = formulationsGender([s.codes.persona, s.codes.hook, s.codes.body, s.codes.angle].map(c => (c ? label(c) : null)));
+      if (conflict) { notes.push(`Слот снят: формулировки разного рода (${[s.codes.hook, s.codes.body].join(" + ")}) — один ролик не может звучать и от женского, и от мужского лица.`); slots.splice(i, 1); continue; }
+      if (!gender || !s.codes.actor) continue;
+      const ag = genderOf.get(s.codes.actor) ?? null;
+      if (!ag || ag === gender) continue;
+      const pool = byGender[gender];
+      if (!pool.length) { notes.push(`Слот снят: формулировки от ${genderLabel(gender)} лица, а в пуле нет актёров этого пола (${s.codes.actor} — ${genderLabel(ag)} пол).`); slots.splice(i, 1); continue; }
+      const chosen = pool[gIdx[gender]++ % Math.min(pool.length, 4)];
+      s.rationale += ` Актёр ${s.codes.actor} (${genderLabel(ag)} пол) заменён на ${chosen}: формулировки написаны от ${genderLabel(gender)} лица.`;
+      s.codes.actor = chosen;
+    }
+  }
+
+  // ── Устаревшие факты → преемники (brief.config.ts → outdated_claims). Код в слоте меняется, сигналы/уровни остаются от родителя.
+  // Страховка: преемники уже применены на входе (маппинг, виннеры, сигналы); если старый код всё же просочился — меняем и код, и «было → стало» согласованно
+  if (Object.keys(succ).length) {
+    for (const s of slots) {
+      const swapped: string[] = [];
+      for (const axis of AXES4) { const c = s.codes[axis]; if (c && succ[c]) { s.codes[axis] = succ[c]; swapped.push(`${c} → ${succ[c]}`); } }
+      if (s.change) { if (s.change.fromCode && succ[s.change.fromCode]) s.change.fromCode = succ[s.change.fromCode]; if (succ[s.change.toCode]) s.change.toCode = succ[s.change.toCode]; }
+      if (swapped.length) s.rationale += ` Норма фактов продукта: ${swapped.join(", ")} (тот же текст с актуальной нормой, parent_code — исходная).`;
+    }
+  }
+
+  // ── Смысловая связность осей (21.10.2026): чужая тема → слот снимается; история от первого лица в интервью → роль «собеседник»
+  {
+    const catOf = new Map(inp.concepts.map(c => [c.code.toUpperCase(), c.category ?? null]));
+    for (let i = slots.length - 1; i >= 0; i--) {
+      const s = slots[i];
+      const cat = s.codes.concept ? catOf.get(s.codes.concept.toUpperCase()) ?? null : null;
+      const texts = { persona: s.codes.persona ? label(s.codes.persona) : null, hook: label(s.codes.hook ?? ""), body: label(s.codes.body ?? ""), angle: label(s.codes.angle ?? "") };
+      const issue = slotCoherenceIssue({ ...texts, conceptCategory: cat, changedAxis: s.change?.axis ?? null });
+      if (issue) { notes.push(`Слот снят (${s.category}, ${s.change?.axis ?? "—"} → ${s.change?.toCode ?? "—"}): ${issue}.`); slots.splice(i, 1); continue; }
+      const role = personaRole(texts.persona, cat);
+      if (role === "interviewee") { (s as { personaRole?: string }).personaRole = "interviewee"; s.rationale += " Персона — история от первого лица, концепция интервью: в брифе её произносит собеседник, ведущий открывает хуком."; }
+    }
+  }
+
   const order: Record<PackSlotCategory, number> = { winner_family: 0, winner_mix: 1, transfer: 2, discovery: 3, competitor: 4 };
   slots.sort((a, b) => order[a.category] - order[b.category] || a.slotId - b.slotId);
-  if (slots.length > n) slots.splice(n);
+  // ── Размер пака (04.11.2026): раньше лишнее резалось с хвоста, а хвост — разведка; концепции оставались с 2 слотами
+  // из 3 и проверка пака валила «покрытие». Теперь: сначала снимаем добор, потом разведку ЦЕЛЫМИ концепциями.
+  const dropConcept = (code: string, why: string) => {
+    for (let i = slots.length - 1; i >= 0; i--) if (slots[i].category === "discovery" && slots[i].codes.concept === code) slots.splice(i, 1);
+    notes.push(`Разведка ${code} снята целиком: ${why}.`);
+  };
+  if (slots.length > n) {
+    for (let i = slots.length - 1; i >= 0 && slots.length > n; i--) if (fillerSlots.has(slots[i])) slots.splice(i, 1);
+    while (slots.length > n) {
+      const disc = slots.filter(s => s.category === "discovery" && s.codes.concept);
+      if (!disc.length) break;
+      dropConcept(disc[disc.length - 1].codes.concept as string, `не влезает в размер пака ${n} (на концепцию нужно ≥3 слота) — увеличь размер пака или убери другую концепцию`);
+    }
+    if (slots.length > n) slots.splice(n);
+  }
+  // Гарантия измеримости разведки: концепция с <3 слотами (после снятий по роду/связности/размеру) снимается целиком
+  {
+    const perConcept: Record<string, number> = {};
+    for (const s of slots) if (s.category === "discovery" && s.codes.concept) perConcept[s.codes.concept] = (perConcept[s.codes.concept] ?? 0) + 1;
+    for (const [code, k] of Object.entries(perConcept)) if (k < 3) dropConcept(code, `осталось ${k} слот(а) из минимум 3, концепцию не измерить — увеличь размер пака`);
+  }
   slots.forEach((s, i) => { s.slotId = i + 1; });
+  const exploreKept = exploreList.filter(c => slots.some(s => s.category === "discovery" && s.codes.concept === c));
 
   // ── Матрица и заметки
   const cells = new Map<string, ExperimentCell>();
@@ -314,7 +402,7 @@ export function designPack(inp: EngineInput): EngineResult {
   const distribution: Record<PackSlotCategory, number> = { winner_family: cnt("winner_family"), winner_mix: cnt("winner_mix"), discovery: cnt("discovery"), transfer: cnt("transfer"), competitor: 0 };
   return {
     slots, distribution, matrix, notes, tiers, debug, medium,
-    signals: { helps, hurts, helpsConcepts, lifetimeHelps }, winners, transferDonors, exploreList,
+    signals: { helps, hurts, helpsConcepts, lifetimeHelps }, winners, transferDonors, exploreList: exploreKept,
     winnersUsed: Array.from(new Set(slots.flatMap(s => [s.basedOnAd, ...(s.fromWinners ?? [])]).filter((x): x is string => !!x))),
   };
 }

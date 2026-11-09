@@ -30,3 +30,16 @@ tail -f ~/Library/Logs/montage-worker.err.log   # ошибки
 - Логи воркера пишутся синхронно (`fs.writeSync`), поэтому видны сразу, без буферизации.
 - Конфиг воркера — через env (можно добавить в блок `EnvironmentVariables` plist): `MONTAGE_FONT`,
   `MONTAGE_BGM_VOLUME`, `MONTAGE_UNIQUIFY`, `MONTAGE_MAX_WORDS`, `MONTAGE_POLL_SECONDS`.
+
+# Ежедневная докачка Google (launchd, macOS)
+
+`scripts/google-daily.sh` раз в день в 09:15: обновляет yt-dlp, скачивает новые скрытые ролики YouTube из Google Ads в Storage
+(`scripts/google-video-backfill.py --min 0`, уже скачанные пропускаются), затем прогоняет прокладку Google → коды
+(`scripts/google-automap.ts`). Без этого новые Google-видео не получают кодов: Gemini по ссылке YouTube их не читает.
+
+```bash
+cp scripts/launchd/com.example.google-daily.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.google-daily.plist
+launchctl kickstart gui/$(id -u)/com.example.google-daily   # прогнать сейчас
+tail -f ~/Library/Logs/google-daily.log
+```

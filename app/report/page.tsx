@@ -365,6 +365,33 @@ export default function ReportPage() {
             </div>
           </Card>
 
+          {/* Те же коды в Meta: воспроизвёлся ли сигнал (не-Meta отчёт, 06.11.2026) */}
+          {(visual.crossChannel?.length ?? 0) > 0 && (
+            <Card>
+              <SectionTitle icon="🔁" color="#48B8D0">Те же формулировки в Meta: воспроизвёлся ли сигнал</SectionTitle>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 10 }}>Код формулировки один на все каналы: креативы Google сопоставлены с Meta через маппинг (копия по визуалу или тексты). Слева вердикт в этом канале за период, справа — в Meta за весь срок. Лиды по креативам Google PMax — оценка, вердикты здесь слабее.</div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead><tr style={{ color: "#888", textAlign: "left" }}><th style={{ padding: 6 }}>Код</th><th style={{ padding: 6 }}>Формулировка</th><th style={{ padding: 6 }}>Этот канал</th><th style={{ padding: 6 }}>Meta</th><th style={{ padding: 6 }}>Итог</th></tr></thead>
+                <tbody>
+                  {visual.crossChannel!.map(x => {
+                    const col = (v: string) => (v === "HELPS" ? "#6EC8A0" : v === "HURTS" ? "#D96B6B" : "#888");
+                    const same = x.channel.verdict === x.meta.verdict && (x.meta.verdict === "HELPS" || x.meta.verdict === "HURTS");
+                    const opposite = (x.channel.verdict === "HELPS" && x.meta.verdict === "HURTS") || (x.channel.verdict === "HURTS" && x.meta.verdict === "HELPS");
+                    return (
+                      <tr key={x.code} style={{ borderTop: "1px solid #1f2330" }}>
+                        <td style={{ padding: 6, fontFamily: "monospace" }}>{x.code}</td>
+                        <td style={{ padding: 6, color: "#ccc" }}>{x.label.slice(0, 110)}</td>
+                        <td style={{ padding: 6, color: col(x.channel.verdict), whiteSpace: "nowrap" }}>{x.channel.verdict}{x.channel.ratio != null ? ` ×${x.channel.ratio.toFixed(2)}` : ""} · {x.channel.adCount} крео</td>
+                        <td style={{ padding: 6, color: col(x.meta.verdict), whiteSpace: "nowrap" }}>{x.meta.verdict}{x.meta.ratio != null ? ` ×${x.meta.ratio.toFixed(2)}` : ""} · {x.meta.adCount} крео</td>
+                        <td style={{ padding: 6, color: same ? "#6EC8A0" : opposite ? "#D96B6B" : "#888" }}>{same ? "воспроизвёлся" : opposite ? "противоположный" : "нет сигнала"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </Card>
+          )}
+
           {/* HELPS / HURTS */}
           <Card>
             <SectionTitle icon="🎯" color="#6EC8A0">Какие формулировки помогают и мешают</SectionTitle>

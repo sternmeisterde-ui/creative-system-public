@@ -138,7 +138,7 @@ async function generatePack(req: NextRequest) {
     const rows = (report.snapshot?.rows ?? []).map(r => ({ ad_name: r.ad_name, auto_status: r.auto_status, spend: Number(r.spend ?? 0), cpl: r.cpl, cpql: r.cpql, leads: Number(r.leads ?? 0) }));
     const constraints = { exploreConcepts: body.exploreConcepts ?? [], blockedConcepts: body.blockedConcepts ?? DEFAULT_BLOCKED_CONCEPTS, actorPool: body.actorPool ?? null, autoExplore: body.autoExplore ?? 2 };
     const designed = body.slots?.length ? null : designPack({
-      format, packSize, rows, lifetimeRows: data.lifetimeRows, medium: data.medium, mapping: data.mapping, formulations: data.formulations, concepts: data.concepts, actors: data.actors, usage: data.usage,
+      format, packSize, rows, lifetimeRows: data.lifetimeRows, medium: data.medium, mapping: data.mapping, formulations: data.formulations, concepts: data.concepts, actors: data.actors, usage: data.usage, successors: data.successors,
       exploreConcepts: constraints.exploreConcepts, autoExplore: constraints.autoExplore, blockedConcepts: constraints.blockedConcepts, actorPool: constraints.actorPool, actorKind: body.actorKind ?? null, transfer: body.transfer ?? true, shares: body.shares,
     });
     const known = new Set(data.formulations.map(f => f.code));

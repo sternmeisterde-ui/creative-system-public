@@ -48,7 +48,13 @@ async function uploadToFilesApi(buffer: ArrayBuffer, mimeType: string, displayNa
     body: JSON.stringify({ file: { display_name: displayName } }),
   });
   const uploadUrl = initRes.headers.get("x-goog-upload-url");
-  if (!uploadUrl) throw new Error("Files API: не удалось инициировать загрузку");
+  if (!uploadUrl) {
+    // реальный статус Google (402 кредиты кончились, 429 лимит, 403 ключ) — авария 26.10.2026 пряталась за общей фразой
+    const body = await initRes.text().catch(() => "");
+    let msg = body.slice(0, 200);
+    try { const e = (JSON.parse(body) as { error?: { code?: number; message?: string; status?: string } }).error; if (e) msg = `${e.code ?? initRes.status} ${e.status ?? ""}: ${(e.message ?? "").slice(0, 160)}`; } catch { /* не JSON */ }
+    throw new Error(`Files API: не удалось инициировать загрузку (HTTP ${initRes.status}${msg ? ` — ${msg}` : ""})`);
+  }
 
   const uploadRes = await fetch(uploadUrl, {
     method: "POST",
@@ -296,4 +302,42 @@ export async function extractTimings(assetUrl: string, texts: Partial<Record<"pe
   const out: ParamTimings = { persona: null, hook: null, body: null, angle: null };
   for (const a of ["persona", "hook", "body", "angle"] as const) { const s = j[a]; if (s && s.start_sec != null && s.end_sec != null && s.end_sec >= s.start_sec) out[a] = [Math.max(0, Math.floor(s.start_sec)), Math.ceil(s.end_sec)]; }
   return out;
+}
+
+// ── Визуальная сверка «тот же ролик?» (06.11.2026, прокладка Google → коды) ─────────────────────────────
+// Тексты Google-ролика уже совпали с Meta-креативами по кодам, но один сценарий часто переснят с разными актёрами
+// (размноженные серии). Актёр и концепция наследуются ТОЛЬКО если совпал визуал: тот же человек в той же обстановке.
+const SAME_SHOOT_PROMPT = (n: number) => `Первым приложено рекламное ВИДЕО. Дальше ${n} КАДРОВ других роликов, пронумерованы 1..${n} (подписи «Кадр N» перед каждым).
+Задача: найти кадр из ТОЙ ЖЕ съёмки, что и видео — тот же человек (лицо, причёска, одежда) в той же обстановке. Совпадение одного сценария/текста НЕ считается: нужен тот же человек.
+Если подходящего кадра нет — match = 0. Верни JSON: {"match": номер кадра или 0, "person": "кто в видео: пол, возраст, внешность, обстановка — коротко", "reason": "почему совпал или почему ни один не подходит"}.`;
+
+export interface SameShootResult { match: number; person: string; reason: string }
+
+export async function compareSameShoot(videoUrl: string, candidates: { imageUrl: string }[]): Promise<SameShootResult> {
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY не задан");
+  const { buffer, mimeType, name } = await fetchBuffer(videoUrl);
+  const fileUri = await uploadToFilesApi(buffer, mimeType, name);
+  const parts: unknown[] = [{ text: SAME_SHOOT_PROMPT(candidates.length) }, { file_data: { mime_type: mimeType, file_uri: fileUri } }];
+  for (let i = 0; i < candidates.length; i++) {
+    const r = await fetch(candidates[i].imageUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!r.ok) continue;
+    const img = Buffer.from(await r.arrayBuffer());
+    parts.push({ text: `Кадр ${i + 1}` }, { inline_data: { mime_type: r.headers.get("content-type") ?? "image/jpeg", data: img.toString("base64") } });
+  }
+  const res = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: {
+        temperature: 0, maxOutputTokens: 1024, thinkingConfig: { thinkingBudget: 0 }, responseMimeType: "application/json",
+        responseSchema: { type: "object", properties: { match: { type: "integer" }, person: { type: "string" }, reason: { type: "string" } }, required: ["match", "person", "reason"] },
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`Gemini error: ${(await res.text()).slice(0, 300)}`);
+  const data = await res.json() as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text ?? "").join("") ?? "";
+  const o = JSON.parse(text) as SameShootResult;
+  if (!(o.match >= 1 && o.match <= candidates.length)) o.match = 0;
+  return o;
 }

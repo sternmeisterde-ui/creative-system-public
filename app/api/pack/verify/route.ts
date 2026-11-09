@@ -17,6 +17,7 @@ interface Body {
   medium?: string;
   winners?: Array<{ adName: string; cpl: number | null; leads: number; spend: number; codes: { persona: string; hook: string; body: string; angle: string }; concept: string | null; actor: string | null }>;
   exploreList?: string[];
+  successors?: Record<string, string>; // устаревший код → преемник (норма фактов продукта): один и тот же параметр
   notes?: string[];
   report?: { id: string; createdAt: string; dateFrom: string | null; dateTo: string | null; overall: string | null };
 }
@@ -39,6 +40,7 @@ const INSTRUCTION = `Ты — независимый аудитор предло
 7) Код «стало» не входит в HURTS → иначе high. Все коды слота есть в БИБЛИОТЕКЕ → иначе high (выдуманный код).
 8) CPL виннера в обосновании совпадает с CPL в блоке ВИННЕРЫ (допуск округления 0.1 €). Нет → medium.
 9) NOTES об измеримости не противоречат слотам.
+10) Блок КОДЫ-ПРЕЕМНИКИ: пара «старый → новый» — ОДИН И ТОТ ЖЕ параметр (тот же текст с актуальной нормой факта продукта, напр. зарплата 3000 → 2200). Если в слоте стоит преемник, а у виннера/в сигналах старый код (или наоборот) — это НЕ изменение, НЕ подмена и НЕ второй параметр; не записывай это как issue.
 
 КАЖДЫЙ issue — это КОНКРЕТНОЕ несоответствие: укажи ожидаемое и фактическое значение (код/число). Если по пункту всё совпадает («соблюдено», «совпадает», «ок») — это НЕ issue, не записывай его. Внутреннее противоречие формулировок обоснования без расхождения с данными — максимум low.
 НЕ считай ошибкой: малое число крео у HELPS-кода (1 крео — помечено как слабый сигнал); одинаковые тексты у персоны и хука (бывает у статики); ИИ-актёров WOM/MAN; укороченные цитаты с «…».
@@ -60,6 +62,7 @@ export async function POST(req: NextRequest) {
   lines.push(`\nДОНОРЫ ПЕРЕНОСА (виннеры другого медиа):`);
   for (const d of b.transferDonors ?? []) lines.push(`  ${d.adName} [${d.medium}]: CPL ${eur(d.cpl)}; коды P=${d.codes.persona} H=${d.codes.hook} B=${d.codes.body} A=${d.codes.angle}`);
   lines.push(`\nСПИСОК РАЗВЕДКИ (концепции, выбранные на тест): ${(b.exploreList ?? []).join(", ") || "—"}`);
+  lines.push(`\nКОДЫ-ПРЕЕМНИКИ (старый → новый = один параметр, норма фактов продукта): ${Object.entries(b.successors ?? {}).map(([a, z]) => `${a} → ${z}`).join("; ") || "—"}`);
   lines.push(`\nВИННЕРЫ-ОСНОВА (метрики ЗА ПЕРИОД ОТЧЁТА, те же, что в обосновании слотов) и их коды:`);
   for (const w of b.winners ?? []) lines.push(`  ${w.adName}: CPL ${eur(w.cpl)}, лиды ${w.leads}, спенд ${eur(w.spend)}; коды P=${w.codes.persona} H=${w.codes.hook} B=${w.codes.body} A=${w.codes.angle} V=${w.concept ?? "—"} actor=${w.actor ?? "—"}`);
   lines.push(`\nБИБЛИОТЕКА (код → полный дословный текст):`);

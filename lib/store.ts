@@ -261,6 +261,7 @@ export const briefStore = {
       // Auto-approve: убрали ручной gate «одобрить/правки» — все брифы готовы к производству.
       status: "approved",
       batch_index: b.batchIndex ?? i,
+      slot_id: b.slotId ?? null,
     }));
     const { data } = await supabase.from("briefs").insert(payload).select();
     return camels<Brief>(data ?? []);
